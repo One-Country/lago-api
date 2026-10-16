@@ -82,7 +82,7 @@ Business logic, and every create, update or delete of a model, lives in a servic
 - Every controller has a `resource_name`, an entry of `ApiKey::RESOURCES`. Without it, every API key of an organization with the `api_permissions` premium integration gets a 403, and only the `"requires API permission"` shared example catches it.
 - Look records up with `find_by` and answer `not_found_error(resource: "alert")`. `find` gives a generic error code.
 - Render failures with `render_error_response(result)`, records with `::V1::<Model>Serializer`, and lists with `::CollectionSerializer` and `pagination_metadata`. `create` returns 200, not 201.
-- Routes go in `config/routes/shared_api.rb`, which is also served under `/api/v2` as beta. Native v2 controllers (`app/controllers/api/v2`) only cover the product catalog and contracts: cursor pagination, `app/serializers/v2`, no nested resources in lists. See `app/controllers/api/v2/product_categories_controller.rb`.
+- Routes go in `config/routes/shared_api.rb`, which is also served under `/api/v2` as beta. Native v2 controllers (`app/controllers/api/v2`) only cover the product catalog, contracts and what they bill (catalog invoices, product fees): cursor pagination, `app/serializers/v2`, no nested resources in lists. See `app/controllers/api/v2/product_categories_controller.rb`.
 - Mask secret parameters in API logs with `filter_audit_log_params!`.
 
 ## GraphQL
