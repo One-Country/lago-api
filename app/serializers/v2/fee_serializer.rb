@@ -9,7 +9,7 @@ module V2
       {pricing_unit_usage: :pricing_unit},
       :true_up_fee,
       :rate_card_rate,
-      :product_filter,
+      {product_filter: {values: :billable_metric_filter}},
       {invoice: :customer},
       {contract: :customer},
       {contract_rate_card: :rate_card},
