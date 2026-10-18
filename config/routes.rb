@@ -53,6 +53,9 @@ Rails.application.routes.draw do
       delete "/contracts/:external_id", to: "contracts#terminate", constraints: {external_id: /[^\/]+/}
       resources :invoices, only: %i[index show] do
         post :void, on: :member
+        post :download_pdf, on: :member
+        post :resend_email, on: :member
+        post :retry, on: :member
       end
       resources :customers, only: [], param: :external_id do
         scope module: :customers do
