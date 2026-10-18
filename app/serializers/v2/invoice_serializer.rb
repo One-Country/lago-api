@@ -58,7 +58,9 @@ module V2
     # has no billing segment linking it to the contract.
     def contracts
       ::CollectionSerializer.new(
-        Contract.where(id: model.fees.where.not(contract_id: nil).select(:contract_id)).order(:created_at, :id),
+        Contract
+          .where(organization_id: model.organization_id, id: model.fees.where.not(contract_id: nil).select(:contract_id))
+          .order(:created_at, :id),
         ::V2::Invoices::ContractSerializer,
         collection_name: "contracts"
       ).serialize[:contracts]

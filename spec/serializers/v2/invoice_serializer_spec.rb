@@ -76,11 +76,24 @@ RSpec.describe V2::InvoiceSerializer do
     let(:includes) { described_class::DETAIL_INCLUDES }
     let(:tax) { create(:tax, organization:) }
     let(:other_contract) { create(:contract, organization:, customer:) }
-    let(:fee_attributes) { {invoice:, subscription: nil, fee_type: :product, invoiceable: product, contract:} }
+    let(:rate_card) { create(:rate_card, organization:, product:) }
+    let(:contract_rate_card) { create(:contract_rate_card, organization:, contract:, rate_card:) }
+    let(:other_contract_rate_card) { create(:contract_rate_card, organization:, contract: other_contract, rate_card:) }
+    let(:fee_attributes) do
+      {invoice:, subscription: nil, fee_type: :product, invoiceable: product, contract:, contract_rate_card:}
+    end
     let(:later_fee) { create(:fee, fee_attributes.merge(created_at: 1.hour.ago)) }
     let(:earlier_fee) { create(:fee, fee_attributes.merge(created_at: 2.hours.ago)) }
     let(:event_fee) do
-      create(:fee, fee_attributes.merge(contract: other_contract, pay_in_advance: true, pay_in_advance_event_transaction_id: "tx_1"))
+      create(
+        :fee,
+        fee_attributes.merge(
+          contract: other_contract,
+          contract_rate_card: other_contract_rate_card,
+          pay_in_advance: true,
+          pay_in_advance_event_transaction_id: "tx_1"
+        )
+      )
     end
     let(:applied_tax) { create(:invoice_applied_tax, invoice:, tax:, fees_amount_cents: 900) }
     let(:custom_section) { create(:applied_invoice_custom_section, invoice:) }
