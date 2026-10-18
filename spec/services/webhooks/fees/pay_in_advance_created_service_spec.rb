@@ -18,5 +18,44 @@ RSpec.describe Webhooks::Fees::PayInAdvanceCreatedService do
 
   describe ".call" do
     it_behaves_like "creates webhook", "fee.created", "fee", {"amount_cents" => Integer, "presentation_breakdowns" => [{"presentation_by" => {"department" => "engineering"}, "units" => "60.0"}]}
+
+    it "keeps the v1 payload for a legacy fee" do
+      webhook_service.call
+
+      payload = Webhook.order(created_at: :desc).first.payload["fee"]
+      expect(payload).to include("lago_id" => fee.id, "lago_subscription_id" => subscription.id)
+      expect(payload).not_to have_key("lago_contract_id")
+    end
+
+    context "with a product fee" do
+      let(:contract) { create(:contract, organization:, customer:) }
+      let(:contract_rate_card) { create(:contract_rate_card, organization:, contract:) }
+      let(:fee) do
+        create(
+          :fee,
+          organization:,
+          billing_entity: customer.billing_entity,
+          invoice: nil,
+          subscription: nil,
+          fee_type: :product,
+          invoiceable: contract_rate_card.rate_card.product,
+          contract:,
+          contract_rate_card:
+        )
+      end
+
+      it "sends the v2 payload" do
+        webhook_service.call
+
+        payload = Webhook.order(created_at: :desc).first.payload["fee"]
+        expect(payload).to include(
+          "lago_id" => fee.id,
+          "external_customer_id" => customer.external_id,
+          "lago_contract_id" => contract.id,
+          "external_contract_id" => contract.external_id
+        )
+        expect(payload).not_to have_key("lago_subscription_id")
+      end
+    end
   end
 end
