@@ -61,6 +61,8 @@ Rails.application.routes.draw do
         put :refresh, on: :member
         put :finalize, on: :member
       end
+      # An invoice route v2 does not serve is unknown on v2, not a v1 fallback.
+      match "invoices(/*path)", to: "/application#not_found", via: :all
       resources :customers, only: [], param: :external_id do
         scope module: :customers do
           resources :invoices, only: :index
