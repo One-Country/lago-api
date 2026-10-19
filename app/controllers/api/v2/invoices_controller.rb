@@ -5,6 +5,8 @@ module Api
     class InvoicesController < BaseController
       include Api::V2::InvoiceIndex
 
+      before_action :ensure_x402_payments_enabled, only: :x402_payment_url
+
       def index
         invoice_index
       end
@@ -16,11 +18,55 @@ module Api
         render_invoice(invoice)
       end
 
+      def update
+        invoice = find_invoice(:visible)
+        return not_found_error(resource: "invoice") unless invoice
+        return method_not_allowed_error(code: "update_on_voided_invoice") if invoice.voided?
+
+        result = ::Invoices::UpdateService.call(
+          invoice:,
+          params: update_params.to_h.deep_symbolize_keys,
+          webhook_notification: true
+        )
+
+        if result.success?
+          render_invoice(result.invoice)
+        else
+          render_error_response(result)
+        end
+      end
+
+      def destroy
+        invoice = find_invoice(:visible)
+        return not_found_error(resource: "invoice") unless invoice
+
+        result = ::Invoices::DeleteService.call(invoice:)
+
+        if result.success?
+          render_invoice(result.invoice)
+        else
+          render_error_response(result)
+        end
+      end
+
       def void
         invoice = find_invoice(:visible)
         return not_found_error(resource: "invoice") unless invoice
 
         result = ::Invoices::VoidService.call(invoice:, params: params.permit(:generate_credit_note, :refund_amount, :credit_amount))
+
+        if result.success?
+          render_invoice(result.invoice)
+        else
+          render_error_response(result)
+        end
+      end
+
+      def lose_dispute
+        invoice = find_invoice(:visible)
+        return not_found_error(resource: "invoice") unless invoice
+
+        result = ::Invoices::LoseDisputeService.call(invoice:, payment_dispute_lost_at: Time.current)
 
         if result.success?
           render_invoice(result.invoice)
@@ -108,6 +154,27 @@ module Api
         end
       end
 
+      def x402_payment_url
+        invoice = find_invoice(:visible)
+        return not_found_error(resource: "invoice") unless invoice
+
+        result = ::X402::Invoices::MintPaymentLinkService.call(invoice:, connection_code: params[:connection_code])
+
+        if result.success?
+          render(
+            json: {
+              invoice_x402_payment_details: {
+                lago_invoice_id: invoice.id,
+                x402_connection_code: invoice.x402_connection.code,
+                x402_payment_url: invoice.x402_payment_url
+              }
+            }
+          )
+        else
+          render_error_response(result)
+        end
+      end
+
       def finalize
         invoice = find_invoice(:draft)
         return not_found_error(resource: "invoice") unless invoice
@@ -140,12 +207,20 @@ module Api
         current_organization.invoices.public_send(status_scope).product_catalog.find_by(id: params[:id])
       end
 
+      def update_params
+        params.require(:invoice).permit(:payment_status)
+      end
+
       def resend_email_params
         params.permit(to: [], cc: [], bcc: [])
       end
 
       def retry_payment_params
         params.permit(payment_method: [:payment_method_type, :payment_method_id]).to_h.deep_symbolize_keys
+      end
+
+      def ensure_x402_payments_enabled
+        forbidden_error(code: "feature_unavailable") unless current_organization.x402_payments_enabled?
       end
 
       def render_invoice(invoice)
