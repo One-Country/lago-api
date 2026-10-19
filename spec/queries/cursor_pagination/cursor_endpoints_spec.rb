@@ -11,14 +11,19 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
   let(:organization) { create(:organization) }
 
   # Without `index`, only the ordering is checked: for a query several indexes can serve.
-  # `index_reversed` says the index is built in the opposite direction, and read backward.
-  shared_examples "a keyset-paginated query" do |table:, index: nil, index_reversed: false|
-    let(:anchor_token) { CursorPagination::Token.encode(table:, record: Struct.new(:id, :created_at).new(SecureRandom.uuid, Time.current)) }
+  # `sort` is the one the endpoint declares; `index_reversed` says the index is built in
+  # the opposite direction, and read backward.
+  shared_examples "a keyset-paginated query" do |table:, index: nil, sort: CursorPagination::DEFAULT_SORT, index_reversed: false|
+    let(:anchor_token) do
+      anchor = Struct.new(:id, :created_at, :issuing_date).new(SecureRandom.uuid, Time.current, Date.current)
+      CursorPagination::Token.encode(table:, record: anchor, sort:)
+    end
+    let(:keyset_order) { sort.map { |column, direction| %("#{table}"."#{column}" #{direction.upcase}) }.join(", ") }
 
     it "ends with the keyset ordering and runs" do
-      scope = filtered_scope.call(CursorPagination::Cursor.new(table:))
+      scope = filtered_scope.call(CursorPagination::Cursor.new(table:, sort:))
 
-      expect(scope.to_sql).to end_with(%(ORDER BY "#{table}"."created_at" DESC, "#{table}"."id" DESC LIMIT 21))
+      expect(scope.to_sql).to end_with("ORDER BY #{keyset_order} LIMIT 21")
       expect(scope.to_a).to eq([])
     end
 
@@ -38,10 +43,10 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
           forward, backward = index_reversed ? ["Index Scan Backward", "Index Scan"] : ["Index Scan", "Index Scan Backward"]
 
           {
-            CursorPagination::Cursor.new(table:) => forward,
-            CursorPagination::Cursor.new(table:, after: anchor_token) => forward,
+            CursorPagination::Cursor.new(table:, sort:) => forward,
+            CursorPagination::Cursor.new(table:, sort:, after: anchor_token) => forward,
             # Paging backward walks the same index in reverse.
-            CursorPagination::Cursor.new(table:, before: anchor_token) => backward
+            CursorPagination::Cursor.new(table:, sort:, before: anchor_token) => backward
           }.each do |cursor, scan|
             plan = ActiveRecord::Base.connection.select_rows("EXPLAIN #{default_scope.call(cursor).to_sql}").flatten.join("\n")
 
@@ -220,6 +225,41 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
 
     # The index of the kept fees is ascending: the page is read backward from it.
     it_behaves_like "a keyset-paginated query", table: "fees", index: "index_fees_on_organization_id_and_created_at_and_id", index_reversed: true
+  end
+
+  context "with InvoicesQuery" do
+    let(:filtered_scope) do
+      lambda do |pagination|
+        InvoicesQuery.call(
+          organization:,
+          search_term: "a",
+          pagination:,
+          filters: {
+            amount_from: 1,
+            amount_to: 2,
+            billing_entity_ids: [SecureRandom.uuid],
+            currency: "EUR",
+            customer_id: SecureRandom.uuid,
+            invoice_type: "contract",
+            issuing_date_from: "2026-01-01",
+            issuing_date_to: "2026-12-31",
+            partially_paid: false,
+            payment_dispute_lost: false,
+            payment_overdue: false,
+            payment_status: ["pending"],
+            product_catalog: true,
+            purchase_order_number: "po",
+            settlements: ["credit_note"],
+            status: ["finalized"]
+          }
+        ).invoices
+      end
+    end
+    let(:default_scope) { ->(pagination) { InvoicesQuery.call(organization:, pagination:, filters: {product_catalog: true}).invoices } }
+
+    # The order of the v1 lists: the index mixes directions, so the pages are bounded by
+    # an OR-expansion, which the index serves from its leading column.
+    it_behaves_like "a keyset-paginated query", table: "invoices", index: "index_invoices_by_cursor", sort: Api::V2::InvoiceIndex::SORT
   end
 
   context "with ContractRateCardsQuery" do

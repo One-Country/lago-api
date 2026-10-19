@@ -148,13 +148,13 @@ RSpec.describe InvoicesQuery do
   end
 
   context "with cursor pagination" do
-    let(:pagination) { CursorPagination::Cursor.new(table: "invoices", limit: 2) }
+    let(:pagination) { CursorPagination::Cursor.new(table: "invoices", sort: Api::V2::InvoiceIndex::SORT, limit: 2) }
     let(:filters) { {status: "finalized"} }
 
-    it "paginates after filtering and ordering" do
+    it "paginates after filtering, in the order of the v1 lists" do
       page = CursorPagination::Page.new(records: result.invoices, cursor: pagination)
 
-      expect(page.records.map(&:id)).to eq(Invoice.where(status: "finalized").order(created_at: :desc, id: :desc).limit(2).ids)
+      expect(page.records.map(&:id)).to eq(Invoice.where(status: "finalized").order(Api::V2::InvoiceIndex::SORT).limit(2).ids)
       expect(page.meta[:next_cursor]).to be_present
     end
   end
@@ -331,6 +331,10 @@ RSpec.describe InvoicesQuery do
 
     context "when searching" do
       let(:search_term) { "7777" }
+      let(:returned_ids) do
+        [contract_invoice, invoice_with_product_fee].each { |invoice| Invoices::RefreshSearchTermsService.call!(invoice:) }
+        result.invoices.pluck(:id)
+      end
 
       it "keeps the search scope on both branches" do
         expect(returned_ids).to eq([contract_invoice.id])

@@ -29,7 +29,7 @@ RSpec.describe Api::V2::InvoicesController do
       expect(json[:meta]).to eq(next_cursor: nil, prev_cursor: nil)
     end
 
-    it_behaves_like "a cursor paginated v2 endpoint", collection: :invoices, model: Invoice do
+    it_behaves_like "a cursor paginated v2 endpoint", collection: :invoices, model: Invoice, sort: Api::V2::InvoiceIndex::SORT do
       let(:paginated_path) { "/api/v2/invoices" }
       let(:create_paginated_record) { ->(created_at) { create(:invoice, organization:, customer:, invoice_type: :contract, created_at:) } }
     end
@@ -38,10 +38,13 @@ RSpec.describe Api::V2::InvoicesController do
       let(:params) { {invoice_type: "advance_fees", billing_entity_codes: [billing_entity.code], statuses: ["finalized"]} }
       let(:billing_entity) { create(:billing_entity, organization:) }
       let(:advance_fees_invoice) { create(:invoice, organization:, customer:, billing_entity:, invoice_type: :advance_charges) }
+      let(:contract_rate_card) { create(:contract_rate_card, organization:, contract: create(:contract, organization:, customer:)) }
 
       before do
-        advance_fees_invoice
-        create(:invoice, organization:, customer:, invoice_type: :advance_charges)
+        [advance_fees_invoice, create(:invoice, organization:, customer:, invoice_type: :advance_charges)].each do |invoice|
+          create(:fee, invoice:, subscription: nil, fee_type: :product, invoiceable: contract_rate_card.rate_card.product,
+            contract: contract_rate_card.contract, contract_rate_card:)
+        end
       end
 
       it "passes them to the query" do
