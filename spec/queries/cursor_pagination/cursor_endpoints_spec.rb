@@ -11,7 +11,8 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
   let(:organization) { create(:organization) }
 
   # Without `index`, only the ordering is checked: for a query several indexes can serve.
-  shared_examples "a keyset-paginated query" do |table:, index: nil|
+  # `index_reversed` says the index is built in the opposite direction, and read backward.
+  shared_examples "a keyset-paginated query" do |table:, index: nil, index_reversed: false|
     let(:anchor_token) { CursorPagination::Token.encode(table:, record: Struct.new(:id, :created_at).new(SecureRandom.uuid, Time.current)) }
 
     it "ends with the keyset ordering and runs" do
@@ -34,11 +35,13 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
         end
 
         it "serves the first page and the following ones from the cursor index" do
+          forward, backward = index_reversed ? ["Index Scan Backward", "Index Scan"] : ["Index Scan", "Index Scan Backward"]
+
           {
-            CursorPagination::Cursor.new(table:) => "Index Scan",
-            CursorPagination::Cursor.new(table:, after: anchor_token) => "Index Scan",
+            CursorPagination::Cursor.new(table:) => forward,
+            CursorPagination::Cursor.new(table:, after: anchor_token) => forward,
             # Paging backward walks the same index in reverse.
-            CursorPagination::Cursor.new(table:, before: anchor_token) => "Index Scan Backward"
+            CursorPagination::Cursor.new(table:, before: anchor_token) => backward
           }.each do |cursor, scan|
             plan = ActiveRecord::Base.connection.select_rows("EXPLAIN #{default_scope.call(cursor).to_sql}").flatten.join("\n")
 
@@ -187,6 +190,36 @@ RSpec.describe "Cursor-paginated queries" do # rubocop:disable RSpec/DescribeCla
     end
 
     it_behaves_like "a keyset-paginated query", table: "plan_rate_cards", index: "index_plan_rate_cards_by_cursor"
+  end
+
+  context "with ProductFeesQuery" do
+    let(:filtered_scope) do
+      lambda do |pagination|
+        ProductFeesQuery.call(
+          organization:,
+          pagination:,
+          filters: {
+            payment_status: "succeeded",
+            external_customer_id: "customer",
+            external_contract_id: "contract",
+            currency: "eur",
+            event_transaction_id: "transaction",
+            created_at_from: "2026-01-01",
+            created_at_to: "2026-12-31",
+            succeeded_at_from: "2026-01-01",
+            succeeded_at_to: "2026-12-31",
+            failed_at_from: "2026-01-01",
+            failed_at_to: "2026-12-31",
+            refunded_at_from: "2026-01-01",
+            refunded_at_to: "2026-12-31"
+          }
+        ).fees
+      end
+    end
+    let(:default_scope) { ->(pagination) { ProductFeesQuery.call(organization:, pagination:).fees } }
+
+    # The index of the kept fees is ascending: the page is read backward from it.
+    it_behaves_like "a keyset-paginated query", table: "fees", index: "index_fees_on_organization_id_and_created_at_and_id", index_reversed: true
   end
 
   context "with ContractRateCardsQuery" do
