@@ -80,6 +80,16 @@ RSpec.describe PreloadableAggregations do
       end
     end
 
+    context "when the record is not persisted" do
+      it "returns the default without querying" do
+        new_invoice = Invoice.new
+
+        queries = count_queries { expect(new_invoice.offset_amount_cents).to eq(0) }
+
+        expect(queries).to eq(0)
+      end
+    end
+
     context "when the preloaded value is zero" do
       it "returns the cached zero without falling back" do
         invoice.aggregation_cache[:offset_amount_cents] = 0

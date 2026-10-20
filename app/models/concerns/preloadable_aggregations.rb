@@ -33,8 +33,11 @@ module PreloadableAggregations
   extend ActiveSupport::Concern
 
   included do
+    # rubocop:disable ThreadSafety/ClassAndModuleAttributes
+    # Only written at class-load time by the macros below, never at runtime.
     class_attribute :own_aggregations, instance_accessor: false, default: {}
     class_attribute :associated_aggregations, instance_accessor: false, default: {}
+    # rubocop:enable ThreadSafety/ClassAndModuleAttributes
   end
 
   class_methods do
@@ -78,11 +81,13 @@ module PreloadableAggregations
       return if names.empty?
 
       ids = records.map(&:id).compact
-      return if ids.empty?
 
       names.each do |name|
         definition = own_aggregations.fetch(name)
-        values = definition[:batch].call(ids)
+        # Records without an id (e.g. a non-persisted preview invoice) get the
+        # default without querying, matching the pre-preload behaviour of an
+        # empty association.
+        values = ids.empty? ? {} : definition[:batch].call(ids)
         records.each { |record| record.aggregation_cache[name] = values.fetch(record.id, definition[:default]) }
       end
     end
