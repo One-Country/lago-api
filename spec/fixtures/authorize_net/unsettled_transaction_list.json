@@ -1,0 +1,18 @@
+{
+  "transactions": [
+    {
+      "transId": "80042512399",
+      "submitTimeUTC": "2026-10-20T19:00:00Z",
+      "submitTimeLocal": "2026-10-20T12:00:00",
+      "transactionStatus": "capturedPendingSettlement",
+      "invoiceNumber": "ffffffffffffffffffff",
+      "accountType": "Visa",
+      "accountNumber": "XXXX1111",
+      "settleAmount": 25.0,
+      "marketType": "eCommerce",
+      "product": "Card Not Present"
+    }
+  ],
+  "totalNumInResultSet": 1,
+  "messages": {"resultCode": "Ok", "message": [{"code": "I00001", "text": "Successful."}]}
+}

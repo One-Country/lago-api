@@ -1,0 +1,22 @@
+{
+  "transactionResponse": {
+    "responseCode": "1",
+    "authCode": "HH5414",
+    "avsResultCode": "Y",
+    "cvvResultCode": "P",
+    "cavvResultCode": "2",
+    "transId": "80042512345",
+    "refTransID": "",
+    "transHash": "",
+    "testRequest": "0",
+    "accountNumber": "XXXX1111",
+    "accountType": "Visa",
+    "messages": [{"code": "1", "description": "This transaction has been approved."}],
+    "transHashSha2": "",
+    "profile": {"customerProfileId": "519123456", "customerPaymentProfileId": "527123456"},
+    "SupplementalDataQualificationIndicator": 0,
+    "networkTransId": "123456789NNNLLLLLLLLLLL"
+  },
+  "refId": "ref",
+  "messages": {"resultCode": "Ok", "message": [{"code": "I00001", "text": "Successful."}]}
+}

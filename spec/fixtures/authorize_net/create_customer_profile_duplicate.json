@@ -1,0 +1,6 @@
+{
+  "customerPaymentProfileIdList": [],
+  "customerShippingAddressIdList": [],
+  "validationDirectResponseList": [],
+  "messages": {"resultCode": "Error", "message": [{"code": "E00039", "text": "A duplicate record with ID 519999999 already exists."}]}
+}

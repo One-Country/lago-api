@@ -101,6 +101,27 @@ FactoryBot.define do
       flow_id { SecureRandom.uuid[0..19] }
     end
   end
+  factory :authorize_net_provider, class: "PaymentProviders::AuthorizeNetProvider" do
+    organization
+    type { "PaymentProviders::AuthorizeNetProvider" }
+    name { "Authorize.net" }
+    code { "authorize_net_#{SecureRandom.uuid}" }
+
+    secrets do
+      {api_login_id:, transaction_key:, signature_key:}.to_json
+    end
+
+    settings do
+      {environment:}
+    end
+
+    transient do
+      api_login_id { SecureRandom.alphanumeric(10) }
+      transaction_key { SecureRandom.alphanumeric(16) }
+      signature_key { SecureRandom.hex(64) }
+      environment { "sandbox" }
+    end
+  end
   factory :flutterwave_provider, class: "PaymentProviders::FlutterwaveProvider" do
     organization
     type { "PaymentProviders::FlutterwaveProvider" }
