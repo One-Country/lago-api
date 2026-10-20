@@ -10,6 +10,10 @@ require "rails_helper"
 # the earlier transaction instead of charging twice. The customer profile is
 # deleted at the end.
 #
+# The sandbox's fraud filter holds charges for review after a few dozen in an
+# hour, so a charge may come back held instead of approved; the replay must
+# still find it and never charge again.
+#
 #   AUTHORIZE_NET_API_LOGIN_ID=... AUTHORIZE_NET_TRANSACTION_KEY=... \
 #     bundle exec rspec spec/integration/authorize_net/payment_integration_spec.rb
 
@@ -80,8 +84,9 @@ describe "Authorize.net Payment Integration Test", type: :request do
     Invoices::Payments::CreateService.call!(invoice:, payment_provider: :authorize_net)
 
     payment = invoice.reload.payments.sole
-    expect(invoice.payment_status).to eq("succeeded")
-    expect(payment).to have_attributes(status: "approved", payable_payment_status: "succeeded", payment_method_id: payment_method.id)
+    expect(payment).to have_attributes(payment_method_id: payment_method.id)
+    expect(payment.status).to be_in(%w[approved held_for_review])
+    expect(invoice.payment_status).to eq((payment.status == "approved") ? "succeeded" : "pending")
     expect(payment.provider_payment_id).to match(/\A\d+\z/)
 
     # A retried job after a lost response: the same payment is charged again
@@ -89,15 +94,12 @@ describe "Authorize.net Payment Integration Test", type: :request do
     Invoices::Payments::CreateService.call!(invoice: replay, payment_provider: :authorize_net)
     first = replay.reload.payments.sole
     first_transaction_id = first.provider_payment_id
+    first_status = first.status
     first.update!(status: "pending", payable_payment_status: "pending", provider_payment_id: nil)
     replay.update!(payment_status: :pending)
 
     PaymentProviders::AuthorizeNet::Payments::CreateService.call!(payment: first.reload, reference: "replay", metadata: {})
 
-    expect(first.reload).to have_attributes(
-      status: "approved",
-      payable_payment_status: "succeeded",
-      provider_payment_id: first_transaction_id
-    )
+    expect(first.reload).to have_attributes(status: first_status, provider_payment_id: first_transaction_id)
   end
 end
