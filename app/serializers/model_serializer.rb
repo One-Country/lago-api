@@ -9,8 +9,6 @@ class ModelSerializer
     end
   end
 
-  Expansion = Data.define(:serializer, :source)
-
   NO_EXPANSIONS = {}.freeze
 
   # Set once per serializer, when its class is loaded, through `expandable`.
@@ -18,14 +16,14 @@ class ModelSerializer
 
   attr_reader :model, :options
 
-  # Lets a native v2 endpoint embed `model.<name>` on `expand[]=<name>`, or what the block returns
-  # when the records are ordered or computed. One record or a list, each rendered by `serializer`
-  # without includes, so that it stays flat. It comes last in `serialize`.
-  def self.expandable(name, serializer:, &source)
+  # Lets a native v2 endpoint embed `model.<name>` on `expand[]=<name>`, or what a private method
+  # of the serializer with that name returns, for records that are ordered or computed. One record
+  # or a list, each rendered by `serializer` without includes, so that it stays flat. It comes last
+  # in `serialize`.
+  def self.expandable(name, serializer:)
     prepend(RendersExpansions)
 
-    source ||= -> { model.public_send(name) }
-    self.expansions = expansions.merge(name.to_sym => Expansion.new(serializer:, source:)).freeze
+    self.expansions = expansions.merge(name.to_sym => serializer).freeze
   end
 
   def self.expandable_names = expansions.keys
@@ -92,10 +90,20 @@ class ModelSerializer
   # The declared expansions found in `includes`, in their declared order: Api::Serializable
   # passes the requested ones, and a nil record renders as null.
   def expanded_payload
-    self.class.expansions.each_with_object({}) do |(name, expansion), payload|
+    self.class.expansions.each_with_object({}) do |(name, serializer), payload|
       next unless include?(name)
 
-      payload[name] = render_expansion(instance_exec(&expansion.source), expansion.serializer)
+      payload[name] = render_expansion(expanded_records(name), serializer)
+    end
+  end
+
+  # Only a method the serializer defines itself overrides the model: one inherited from
+  # ModelSerializer or Kernel never does.
+  def expanded_records(name)
+    if respond_to?(name, true) && method(name).owner < ModelSerializer
+      send(name)
+    else
+      model.public_send(name)
     end
   end
 
