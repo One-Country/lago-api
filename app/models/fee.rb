@@ -3,7 +3,7 @@
 class Fee < ApplicationRecord
   include Currencies
   include Discard::Model
-  include PreloaderCache
+  include PreloadableAggregations
 
   self.discard_column = :deleted_at
   self.ignored_columns += %w[duplicated_in_advance]
@@ -226,8 +226,8 @@ class Fee < ApplicationRecord
     remaining_amount
   end
 
-  def credited_amount_cents
-    preloader_cache[:credited_amount_cents] || credit_note_items.sum(:amount_cents)
+  preloadable_aggregation :credited_amount_cents do |ids|
+    CreditNoteItem.where(fee_id: ids).group(:fee_id).sum(:amount_cents)
   end
 
   def creditable_from_wallet_amount_cents

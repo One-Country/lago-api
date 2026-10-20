@@ -101,7 +101,7 @@ module DataExports
       end
 
       def collection
-        InvoicesPreloader.new(Invoice.find(data_export_part.object_ids), :offset_amount_cents).call
+        Invoice.preload_aggregations(Invoice.find(data_export_part.object_ids), :offset_amount_cents)
       end
 
       def organization

@@ -84,7 +84,7 @@ module Resolvers
 
       return result_error(result) unless result.success?
 
-      ::InvoicesPreloader.new(
+      ::Invoice.preload_aggregations(
         result.invoices.preload(
           :fees,
           :regenerated_invoice,
@@ -92,7 +92,7 @@ module Resolvers
           :billing_entity,
           {customer: :billing_entity}
         )
-      ).call
+      )
     end
   end
 end

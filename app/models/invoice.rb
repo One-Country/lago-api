@@ -1,7 +1,7 @@
 # frozen_string_literal: true
 
 class Invoice < ApplicationRecord
-  include PreloaderCache
+  include PreloadableAggregations
 
   self.ignored_columns += [:negative_amount_cents] # TODO: remove when negative_amount_cents is removed from the database
 
@@ -296,9 +296,15 @@ class Invoice < ApplicationRecord
     }
   end
 
-  def offset_amount_cents
-    preloader_cache[:offset_amount_cents] || credit_notes.finalized.sum(:offset_amount_cents)
+  preloadable_aggregation :offset_amount_cents do |ids|
+    CreditNote.where(invoice_id: ids).finalized.group(:invoice_id).sum(:offset_amount_cents)
   end
+
+  preloadable_aggregation :refunded_amount_cents do |ids|
+    CreditNote.where(invoice_id: ids).group(:invoice_id).sum(:refund_amount_cents)
+  end
+
+  preloadable_associated_aggregation :fees, :credited_amount_cents
 
   def total_due_amount_cents
     return 0 if voided?
@@ -368,10 +374,6 @@ class Invoice < ApplicationRecord
 
     refundable_cents = [remaining_paid_cents, creditable_amount_cents].min
     refundable_cents.negative? ? 0 : refundable_cents
-  end
-
-  def refunded_amount_cents
-    preloader_cache[:refunded_amount_cents] || credit_notes.sum(:refund_amount_cents)
   end
 
   # Credit invoices have a single credit-type fee linked to the wallet transaction

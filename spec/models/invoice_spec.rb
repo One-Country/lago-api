@@ -2105,7 +2105,7 @@ RSpec.describe Invoice do
 
     context "when the value is cached by a preloader" do
       before do
-        invoice.preloader_cache[:refunded_amount_cents] = 100
+        invoice.aggregation_cache[:refunded_amount_cents] = 100
       end
 
       it "returns the cached value" do
@@ -2135,7 +2135,7 @@ RSpec.describe Invoice do
 
     context "when the value is cached by a preloader" do
       before do
-        invoice.preloader_cache[:offset_amount_cents] = 100
+        invoice.aggregation_cache[:offset_amount_cents] = 100
       end
 
       it "returns the cached value" do

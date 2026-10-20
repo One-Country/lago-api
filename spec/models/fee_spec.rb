@@ -747,7 +747,7 @@ RSpec.describe Fee do
 
     context "when the value is cached by a preloader" do
       before do
-        fee.preloader_cache[:credited_amount_cents] = 100
+        fee.aggregation_cache[:credited_amount_cents] = 100
       end
 
       it "returns the cached value" do
