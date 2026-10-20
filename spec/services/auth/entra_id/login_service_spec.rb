@@ -96,9 +96,11 @@ RSpec.describe Auth::EntraId::LoginService, cache: :memory do
     context "when the integration organization disallows the login method but another membership allows it" do
       let(:user) { create(:user, email: "foo@bar.com") }
 
+      let(:other_organization) { create(:organization, authentication_methods: %w[email_password entra_id]) }
+
       before do
         create(:membership, user:, organization: entra_id_integration.organization)
-        create(:membership, user:, organization: create(:organization, authentication_methods: %w[email_password entra_id]))
+        create(:membership, user:, organization: other_organization)
         entra_id_integration.organization.disable_entra_id_authentication!
       end
 
@@ -108,6 +110,21 @@ RSpec.describe Auth::EntraId::LoginService, cache: :memory do
         expect(result).not_to be_success
         expect(result.error.messages).to match(entra_id: ["login_method_not_authorized"])
         expect(result.token).to be_nil
+      end
+
+      context "when both organizations keep cross-organization SSO sessions" do
+        before do
+          entra_id_integration.organization.enable_feature_flag!(:sso_cross_organization_sessions)
+          other_organization.enable_feature_flag!(:sso_cross_organization_sessions)
+        end
+
+        it "logs the user in" do
+          result = service.call
+
+          expect(result).to be_success
+          expect(result.token).to be_present
+          expect(other_organization.accessible_by_session?(**Utils::AuthToken.decode(token: result.token).slice("login_method", "sso_organization_id", "sso_issuer").symbolize_keys)).to be(true)
+        end
       end
     end
 
@@ -226,6 +243,35 @@ RSpec.describe Auth::EntraId::LoginService, cache: :memory do
         expect(result).not_to be_success
         expect(result.error.messages[:entra_id]).to eq(["login_method_not_authorized"])
         expect(result.token).to be_nil
+      end
+
+      context "when the integration organization keeps cross-organization SSO sessions" do
+        before { entra_id_integration.organization.enable_feature_flag!(:sso_cross_organization_sessions) }
+
+        it "logs the user in and adds them to the organization" do
+          result = service.call
+
+          expect(result).to be_success
+          expect(result.token).to be_present
+          expect(user.memberships.active.where(organization: entra_id_integration.organization)).to exist
+        end
+      end
+    end
+
+    context "when an existing user only belongs to an organization whose integration has the same issuer" do
+      let(:user) { create(:user, email: "foo@bar.com") }
+      let(:other_organization) { create(:organization, authentication_methods: %w[email_password entra_id]) }
+
+      before do
+        create(:entra_id_integration, organization: other_organization, domain: "baz.com", tenant_id: entra_id_integration.tenant_id)
+        create(:membership, user:, organization: other_organization)
+      end
+
+      it "logs the user in, as after accepting that organization's invite" do
+        result = service.call
+
+        expect(result).to be_success
+        expect(result.token).to be_present
       end
     end
 

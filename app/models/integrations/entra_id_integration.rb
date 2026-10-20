@@ -33,9 +33,8 @@ module Integrations
     # The Entra tenant that answers the token request built from `host` and `tenant_id`. A session
     # it issues can open another organization only if that organization's integration has the same issuer.
     def sso_issuer
-      return if tenant_id.blank? || MULTI_TENANT_IDS.include?(tenant_id.downcase)
-
-      "#{host.downcase}/#{tenant_id.downcase}"
+      single_tenant = tenant_id.present? && MULTI_TENANT_IDS.exclude?(tenant_id.downcase)
+      "#{host.downcase}/#{tenant_id.downcase}" if single_tenant
     end
 
     def additional_domains

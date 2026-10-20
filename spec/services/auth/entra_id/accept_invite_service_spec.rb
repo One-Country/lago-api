@@ -39,6 +39,8 @@ RSpec.describe Auth::EntraId::AcceptInviteService, :premium, cache: :memory do
 
       decoded = Utils::AuthToken.decode(token: result.token)
       expect(decoded["login_method"]).to eq(Organizations::AuthenticationMethods::ENTRA_ID)
+      expect(decoded["sso_organization_id"]).to eq(entra_id_integration.organization_id)
+      expect(decoded["sso_issuer"]).to eq(entra_id_integration.sso_issuer)
     end
 
     context "when the email domain belongs to another organization's integration" do
@@ -66,18 +68,6 @@ RSpec.describe Auth::EntraId::AcceptInviteService, :premium, cache: :memory do
           expect(invite.reload).to be_accepted
           expect(Utils::AuthToken.decode(token: result.token)["sso_organization_id"]).to eq(other_organization.id)
         end
-
-        context "when the integration's organization does not allow the login method" do
-          before { other_organization.disable_entra_id_authentication! }
-
-          it "refuses the invite and keeps it pending" do
-            result = service.call
-
-            expect(result).not_to be_success
-            expect(result.error.messages).to eq({entra_id: ["login_method_not_authorized"]})
-            expect(invite.reload).to be_pending
-          end
-        end
       end
     end
 
@@ -89,6 +79,19 @@ RSpec.describe Auth::EntraId::AcceptInviteService, :premium, cache: :memory do
 
         expect(result).not_to be_success
         expect(result.error.messages).to eq({base: ["code_not_found"]})
+      end
+    end
+
+    context "when the integration's organization does not allow the login method" do
+      let(:other_organization) { create(:organization, premium_integrations: ["entra_id"]) }
+      let(:entra_id_integration) { create(:entra_id_integration, domain: "bar.com", organization: other_organization) }
+
+      it "refuses the invite and keeps it pending" do
+        result = service.call
+
+        expect(result).not_to be_success
+        expect(result.error.messages).to eq({entra_id: ["login_method_not_authorized"]})
+        expect(invite.reload).to be_pending
       end
     end
 

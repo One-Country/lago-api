@@ -7846,7 +7846,7 @@
               "args": [],
               "type": {
                 "kind": "SCALAR",
-                "name": "String",
+                "name": "ObfuscatedString",
                 "ofType": null
               },
               "isDeprecated": false,
@@ -8083,6 +8083,30 @@
                 "kind": "OBJECT",
                 "name": "Organization",
                 "ofType": null
+              },
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "taxes",
+              "description": null,
+              "args": [],
+              "type": {
+                "kind": "NON_NULL",
+                "name": null,
+                "ofType": {
+                  "kind": "LIST",
+                  "name": null,
+                  "ofType": {
+                    "kind": "NON_NULL",
+                    "name": null,
+                    "ofType": {
+                      "kind": "OBJECT",
+                      "name": "Tax",
+                      "ofType": null
+                    }
+                  }
+                }
               },
               "isDeprecated": false,
               "deprecationReason": null
@@ -14737,6 +14761,26 @@
                   "kind": "SCALAR",
                   "name": "String",
                   "ofType": null
+                }
+              },
+              "defaultValue": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "taxCodes",
+              "description": null,
+              "type": {
+                "kind": "LIST",
+                "name": null,
+                "ofType": {
+                  "kind": "NON_NULL",
+                  "name": null,
+                  "ofType": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
                 }
               },
               "defaultValue": null,
@@ -34099,6 +34143,12 @@
           "interfaces": null,
           "enumValues": [
             {
+              "name": "ADD_ONS",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
               "name": "ALERTS",
               "description": null,
               "isDeprecated": false,
@@ -34118,6 +34168,12 @@
             },
             {
               "name": "CREDIT_NOTES",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "COUPONS",
               "description": null,
               "isDeprecated": false,
               "deprecationReason": null
@@ -34257,6 +34313,24 @@
           "interfaces": null,
           "enumValues": [
             {
+              "name": "add_on_created",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "add_on_updated",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "add_on_deleted",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
               "name": "alert_triggered",
               "description": null,
               "isDeprecated": false,
@@ -34360,6 +34434,30 @@
             },
             {
               "name": "credit_note_provider_refund_failure",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "coupon_created",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "coupon_updated",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "coupon_deleted",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "coupon_terminated",
               "description": null,
               "isDeprecated": false,
               "deprecationReason": null
@@ -35075,6 +35173,12 @@
               "description": null,
               "isDeprecated": false,
               "deprecationReason": null
+            },
+            {
+              "name": "sso_cross_organization_sessions",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
             }
           ],
           "possibleTypes": null
@@ -35381,6 +35485,30 @@
               "type": {
                 "kind": "OBJECT",
                 "name": "ChargeFilter",
+                "ofType": null
+              },
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "contract",
+              "description": null,
+              "args": [],
+              "type": {
+                "kind": "OBJECT",
+                "name": "Contract",
+                "ofType": null
+              },
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "contractRateCard",
+              "description": null,
+              "args": [],
+              "type": {
+                "kind": "OBJECT",
+                "name": "ContractAppliedRateCard",
                 "ofType": null
               },
               "isDeprecated": false,
@@ -44079,6 +44207,12 @@
               "description": null,
               "isDeprecated": false,
               "deprecationReason": null
+            },
+            {
+              "name": "Product",
+              "description": null,
+              "isDeprecated": false,
+              "deprecationReason": null
             }
           ],
           "possibleTypes": null
@@ -44724,7 +44858,7 @@
               "args": [],
               "type": {
                 "kind": "SCALAR",
-                "name": "String",
+                "name": "ObfuscatedString",
                 "ofType": null
               },
               "isDeprecated": false,
@@ -61083,6 +61217,39 @@
                   "kind": "SCALAR",
                   "name": "ID",
                   "ofType": null
+                }
+              },
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "integrationMappings",
+              "description": null,
+              "args": [
+                {
+                  "name": "integrationId",
+                  "description": null,
+                  "type": {
+                    "kind": "SCALAR",
+                    "name": "ID",
+                    "ofType": null
+                  },
+                  "defaultValue": null,
+                  "isDeprecated": false,
+                  "deprecationReason": null
+                }
+              ],
+              "type": {
+                "kind": "LIST",
+                "name": null,
+                "ofType": {
+                  "kind": "NON_NULL",
+                  "name": null,
+                  "ofType": {
+                    "kind": "OBJECT",
+                    "name": "Mapping",
+                    "ofType": null
+                  }
                 }
               },
               "isDeprecated": false,
@@ -83776,6 +83943,26 @@
                 "kind": "SCALAR",
                 "name": "String",
                 "ofType": null
+              },
+              "defaultValue": null,
+              "isDeprecated": false,
+              "deprecationReason": null
+            },
+            {
+              "name": "taxCodes",
+              "description": null,
+              "type": {
+                "kind": "LIST",
+                "name": null,
+                "ofType": {
+                  "kind": "NON_NULL",
+                  "name": null,
+                  "ofType": {
+                    "kind": "SCALAR",
+                    "name": "String",
+                    "ofType": null
+                  }
+                }
               },
               "defaultValue": null,
               "isDeprecated": false,

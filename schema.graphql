@@ -1496,7 +1496,7 @@ enum CancellationReasonEnum {
 
 type CashfreeProvider {
   clientId: String
-  clientSecret: String
+  clientSecret: ObfuscatedString
   code: String!
   id: ID!
   name: String!
@@ -1525,6 +1525,7 @@ type CatalogPlan {
   invoiceDisplayName: String
   name: String!
   organization: Organization
+  taxes: [Tax!]!
   updatedAt: ISO8601DateTime!
 }
 
@@ -3467,6 +3468,7 @@ input CreateCatalogPlanInput {
   description: String
   invoiceDisplayName: String
   name: String!
+  taxCodes: [String!]
 }
 
 """
@@ -6970,8 +6972,10 @@ type Event {
 }
 
 enum EventCategoryEnum {
+  ADD_ONS
   ALERTS
   BILLABLE_METRICS
+  COUPONS
   CREDIT_NOTES
   CUSTOMERS
   DUNNING_CAMPAIGNS
@@ -7004,6 +7008,9 @@ type EventCollection {
 }
 
 enum EventTypeEnum {
+  add_on_created
+  add_on_deleted
+  add_on_updated
   alert_triggered
   all
   billable_metric_created
@@ -7017,6 +7024,10 @@ enum EventTypeEnum {
   contract_started
   contract_terminated
   contract_updated
+  coupon_created
+  coupon_deleted
+  coupon_terminated
+  coupon_updated
   credit_note_created
   credit_note_generated
   credit_note_provider_refund_failure
@@ -7159,6 +7170,7 @@ enum FeatureFlagEnum {
   product_catalog
   realtime_usage
   skip_credit_invoice_auto_payment_delay
+  sso_cross_organization_sessions
   stripe_shared_payment_token
   usage_prefilter_incremental
   usage_prefilter_short_cache
@@ -7202,6 +7214,8 @@ type Fee implements InvoiceItem {
   appliedTaxes: [FeeAppliedTax!]
   charge: Charge
   chargeFilter: ChargeFilter
+  contract: Contract
+  contractRateCard: ContractAppliedRateCard
   creditableAmountCents: BigInt!
   currency: CurrencyEnum!
   description: String
@@ -8473,6 +8487,7 @@ input LoseInvoiceDisputeInput {
 enum MappableTypeEnum {
   AddOn
   BillableMetric
+  Product
 }
 
 type Mapping {
@@ -8580,7 +8595,7 @@ input MetadataInput {
 }
 
 type MoneyhashProvider {
-  apiKey: String
+  apiKey: ObfuscatedString
   code: String!
   flowId: String
   id: ID!
@@ -12097,6 +12112,7 @@ type Product {
   description: String
   filtersCount: Int!
   id: ID!
+  integrationMappings(integrationId: ID): [Mapping!]
   invoiceDisplayName: String
   name: String!
   organization: Organization
@@ -15790,6 +15806,7 @@ input UpdateCatalogPlanInput {
   id: ID!
   invoiceDisplayName: String
   name: String
+  taxCodes: [String!]
 }
 
 """

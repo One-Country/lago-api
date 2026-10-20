@@ -31,6 +31,17 @@ RSpec.describe Integrations::OktaIntegration do
         expect(subject.host).to eq("test.okta.com")
       end
     end
+
+    context "when settings host is blank" do
+      before do
+        subject.organization_name = "test"
+        subject.host = ""
+      end
+
+      it "use the default host" do
+        expect(subject.host).to eq("test.okta.com")
+      end
+    end
   end
 
   describe "#sso_issuer" do
@@ -77,6 +88,49 @@ RSpec.describe Integrations::OktaIntegration do
           okta_integration.host = "other.example.com/okta"
 
           expect(okta_integration).not_to be_valid
+        end
+      end
+    end
+
+    describe "organization_name validation" do
+      it "rejects a name that does not build a bare hostname" do
+        okta_integration.organization_name = "evil.com/x?"
+
+        expect(okta_integration).not_to be_valid
+        expect(okta_integration.errors[:organization_name]).to eq(["organization_name_invalid"])
+      end
+
+      it "ignores the name when the host is set" do
+        okta_integration.organization_name = "Acme Corp"
+        okta_integration.host = "acme.okta.com"
+
+        expect(okta_integration).to be_valid
+      end
+
+      context "when the host of an existing integration is cleared" do
+        subject(:okta_integration) { create(:okta_integration, settings: {client_id: "id", domain: "acme.test", organization_name: "Acme Corp", host: "acme.okta.com"}) }
+
+        it "rejects a name that does not build a bare hostname" do
+          okta_integration.host = nil
+
+          expect(okta_integration).not_to be_valid
+          expect(okta_integration.errors[:organization_name]).to eq(["organization_name_invalid"])
+        end
+      end
+
+      context "when an existing integration already stores an invalid name" do
+        subject(:okta_integration) { create(:okta_integration) }
+
+        before do
+          settings = okta_integration.settings.merge("organization_name" => "legacy name")
+          okta_integration.update_column(:settings, settings) # rubocop:disable Rails/SkipsModelValidations
+          okta_integration.reload
+        end
+
+        it "keeps saving other changes" do
+          okta_integration.client_id = "new_client_id"
+
+          expect(okta_integration).to be_valid
         end
       end
     end

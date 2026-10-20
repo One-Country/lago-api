@@ -227,6 +227,28 @@ RSpec.describe GraphqlController do
         expect(json[:errors].first[:extensions][:code]).to eq("forbidden")
       end
 
+      context "when the other organization keeps cross-organization SSO sessions" do
+        let(:other_organization) { create(:organization, authentication_methods: %w[email_password okta], feature_flags: ["sso_cross_organization_sessions"]) }
+
+        it "refuses a session from an organization without the flag" do
+          query_organization(other_organization)
+
+          expect(json[:errors].first[:extensions][:code]).to eq("forbidden")
+        end
+
+        context "when the organization whose integration authenticated the user keeps them too" do
+          let(:sso_organization) { create(:organization, authentication_methods: [okta], feature_flags: ["sso_cross_organization_sessions"]) }
+
+          it "opens it without an Okta integration" do
+            query_organization(other_organization)
+
+            expect(json[:errors]).to be_nil
+            expect(json[:data][:organization][:id]).to eq(other_organization.id)
+            expect(json[:data][:organization][:accessibleByCurrentSession]).to be(true)
+          end
+        end
+      end
+
       it "opens another organization whose integration uses the same identity provider" do
         create(:okta_integration, organization: other_organization, domain: "other.test", host: "SSO.okta.com")
 
@@ -291,6 +313,44 @@ RSpec.describe GraphqlController do
         )
 
         expect(response.status).to be(200)
+      end
+    end
+
+    context "with a customer portal token and merchant credentials of another organization" do
+      let(:membership) { create(:membership, roles: [:admin]) }
+      let(:customer) { create(:customer) }
+      let(:invoice) { create(:invoice, customer:, organization: customer.organization) }
+      let(:portal_token) do
+        ActiveSupport::MessageVerifier.new(ENV["SECRET_KEY_BASE"]).generate(customer.id, expires_in: 12.hours)
+      end
+      let(:query) do
+        <<~GQL
+          query {
+            customerPortalInvoices(limit: 5) {
+              collection {
+                id
+                activityLogs { activityId }
+                metadata { key value }
+              }
+            }
+          }
+        GQL
+      end
+
+      before { create(:invoice_metadata, invoice:) }
+
+      it "does not grant the merchant permissions on the portal data" do
+        post "/graphql",
+          headers: {
+            "customer-portal-token" => portal_token,
+            "Authorization" => "Bearer #{Utils::AuthToken.encode(user: membership.user)}",
+            "x-lago-organization" => membership.organization_id
+          },
+          params: {query:}
+
+        expect(membership.organization_id).not_to eq(customer.organization_id)
+        expect(json[:errors]).to be_nil
+        expect(json[:data][:customerPortalInvoices][:collection]).to eq([{id: invoice.id, activityLogs: nil, metadata: nil}])
       end
     end
 

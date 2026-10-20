@@ -23,7 +23,9 @@ module AuthenticableUser
   def current_membership
     return unless current_user
 
-    @current_membership ||= organization_membership if organization_membership&.organization&.accessible_by_session?(**session_claims)
+    return @current_membership if defined?(@current_membership)
+
+    @current_membership = organization_membership if organization_membership&.organization&.accessible_by_session?(**session_claims)
   end
 
   def organization_membership

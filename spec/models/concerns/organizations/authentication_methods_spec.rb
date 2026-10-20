@@ -123,5 +123,24 @@ RSpec.describe Organizations::AuthenticationMethods do
         expect(organization.accessible_by_session?(login_method: okta, sso_organization_id: SecureRandom.uuid, sso_issuer: "acme.okta.com")).to be(false)
       end
     end
+
+    context "when the organization keeps cross-organization SSO sessions" do
+      let(:organization) { create(:organization, authentication_methods: %w[email_password okta], feature_flags: ["sso_cross_organization_sessions"]) }
+
+      let(:sso_organization) { create(:organization, feature_flags: ["sso_cross_organization_sessions"]) }
+
+      it "accepts an SSO session from a flagged organization's identity provider" do
+        expect(organization.accessible_by_session?(login_method: okta, sso_organization_id: sso_organization.id, sso_issuer: "acme.okta.com")).to be(true)
+      end
+
+      it "refuses an SSO session from an organization without the flag" do
+        expect(organization.accessible_by_session?(login_method: okta, sso_organization_id: create(:organization).id, sso_issuer: "evil.test")).to be(false)
+        expect(organization.accessible_by_session?(login_method: okta, sso_organization_id: SecureRandom.uuid, sso_issuer: "evil.test")).to be(false)
+      end
+
+      it "refuses a login method the organization does not allow" do
+        expect(organization.accessible_by_session?(login_method: Organizations::AuthenticationMethods::ENTRA_ID, sso_organization_id: SecureRandom.uuid)).to be(false)
+      end
+    end
   end
 end

@@ -68,18 +68,6 @@ RSpec.describe Auth::Okta::AcceptInviteService, :premium, cache: :memory do
           expect(invite.reload).to be_accepted
           expect(Utils::AuthToken.decode(token: result.token)["sso_organization_id"]).to eq(other_organization.id)
         end
-
-        context "when the integration's organization does not allow the login method" do
-          before { other_organization.disable_okta_authentication! }
-
-          it "refuses the invite and keeps it pending" do
-            result = service.call
-
-            expect(result).not_to be_success
-            expect(result.error.messages).to eq({okta: ["login_method_not_authorized"]})
-            expect(invite.reload).to be_pending
-          end
-        end
       end
     end
 
@@ -91,6 +79,19 @@ RSpec.describe Auth::Okta::AcceptInviteService, :premium, cache: :memory do
 
         expect(result).not_to be_success
         expect(result.error.messages).to eq({base: ["code_not_found"]})
+      end
+    end
+
+    context "when the integration's organization does not allow the login method" do
+      let(:other_organization) { create(:organization, premium_integrations: ["okta"]) }
+      let(:okta_integration) { create(:okta_integration, domain: "bar.com", organization_name: "foo", organization: other_organization) }
+
+      it "refuses the invite and keeps it pending" do
+        result = service.call
+
+        expect(result).not_to be_success
+        expect(result.error.messages).to eq({okta: ["login_method_not_authorized"]})
+        expect(invite.reload).to be_pending
       end
     end
 
@@ -148,6 +149,14 @@ RSpec.describe Auth::Okta::AcceptInviteService, :premium, cache: :memory do
 
         expect(result).not_to be_success
         expect(result.error.messages.values.flatten).to include("okta_userinfo_error")
+      end
+    end
+
+    context "when okta userinfo email casing differs from the state one" do
+      let(:okta_userinfo_response) { {"email" => "Foo@Bar.com"} }
+
+      it "accepts the invite" do
+        expect(service.call).to be_success
       end
     end
 
