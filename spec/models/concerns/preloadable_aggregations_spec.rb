@@ -74,9 +74,17 @@ RSpec.describe PreloadableAggregations do
 
   describe "generated reader" do
     context "when the value was not preloaded" do
-      it "falls back to a single-record query and caches it" do
+      it "computes it live without caching" do
         expect(invoice.offset_amount_cents).to eq(15_00)
-        expect(invoice.aggregation_cache[:offset_amount_cents]).to eq(15_00)
+        expect(invoice.aggregation_cache).not_to have_key(:offset_amount_cents)
+      end
+
+      it "reflects changes between calls instead of serving a stale cache" do
+        expect(invoice.offset_amount_cents).to eq(15_00)
+
+        create(:credit_note, invoice:, status: :finalized, offset_amount_cents: 5_00)
+
+        expect(invoice.offset_amount_cents).to eq(20_00)
       end
     end
 

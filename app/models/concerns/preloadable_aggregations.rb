@@ -48,8 +48,14 @@ module PreloadableAggregations
       define_method(name) do
         return aggregation_cache[name] if aggregation_cache.key?(name)
 
-        self.class.preload_aggregations([self], name)
-        aggregation_cache[name]
+        # Not preloaded: compute live on every call and do NOT cache. The rows
+        # this sums over can change between calls during create/validate flows,
+        # so a cached fallback would go stale. Only an explicit
+        # preload_aggregations (index paths) caches.
+        definition = self.class.own_aggregations.fetch(name)
+        next definition[:default] if id.nil?
+
+        definition[:batch].call([id]).fetch(id, definition[:default])
       end
     end
 
