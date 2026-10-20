@@ -9,6 +9,8 @@ class ModelSerializer
     end
   end
 
+  Expansion = Data.define(:serializer, :source)
+
   NO_EXPANSIONS = {}.freeze
 
   # Set once per serializer, when its class is loaded, through `expandable`.
@@ -16,12 +18,14 @@ class ModelSerializer
 
   attr_reader :model, :options
 
-  # Lets a native v2 endpoint embed `model.<name>` on `expand[]=<name>`, rendered by `serializer`
-  # without includes, so that the embedded record stays flat. It comes last in `serialize`.
-  def self.expandable(name, serializer:)
+  # Lets a native v2 endpoint embed `model.<name>` on `expand[]=<name>`, or what the block returns
+  # when the records are ordered or computed. One record or a list, each rendered by `serializer`
+  # without includes, so that it stays flat. It comes last in `serialize`.
+  def self.expandable(name, serializer:, &source)
     prepend(RendersExpansions)
 
-    self.expansions = expansions.merge(name.to_sym => serializer).freeze
+    source ||= -> { model.public_send(name) }
+    self.expansions = expansions.merge(name.to_sym => Expansion.new(serializer:, source:)).freeze
   end
 
   def self.expandable_names = expansions.keys
@@ -88,10 +92,18 @@ class ModelSerializer
   # The declared expansions found in `includes`, in their declared order: Api::Serializable
   # passes the requested ones, and a nil record renders as null.
   def expanded_payload
-    self.class.expansions.each_with_object({}) do |(name, serializer), payload|
+    self.class.expansions.each_with_object({}) do |(name, expansion), payload|
       next unless include?(name)
 
-      payload[name] = model.public_send(name)&.then { serializer.new(it).serialize }
+      payload[name] = render_expansion(instance_exec(&expansion.source), expansion.serializer)
+    end
+  end
+
+  def render_expansion(records, serializer)
+    case records
+    when nil then nil
+    when Array, ActiveRecord::Relation then records.map { serializer.new(it).serialize }
+    else serializer.new(records).serialize
     end
   end
 end
