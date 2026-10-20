@@ -14,17 +14,27 @@ module PaymentProviders
         # timed out is answered as a duplicate instead of being made twice.
         DUPLICATE_WINDOW_SECONDS = 28_800
         DUPLICATE_REASON_CODE = "11"
+        # A transaction can take several seconds to show in the transaction list.
+        LOOKUP_DELAYS_SECONDS = [0, 3, 7, 15].freeze
         INVOICE_NUMBER_LENGTH = 20
         DESCRIPTION_LENGTH = 255
 
         # Statuses of an earlier transaction found after a duplicate response.
+        # Any other status keeps the payment processing: failing it would let a
+        # later retry charge again.
         LISTED_STATUSES = {
           "authorizedPendingCapture" => "approved",
           "capturedPendingSettlement" => "approved",
           "settledSuccessfully" => "approved",
+          "approvedReview" => "approved",
           "FDSPendingReview" => "held_for_review",
           "FDSAuthorizedPendingReview" => "held_for_review",
-          "declined" => "declined"
+          "underReview" => "held_for_review",
+          "declined" => "declined",
+          "failedReview" => "declined",
+          "voided" => "declined",
+          "expired" => "declined",
+          "generalError" => "error"
         }.freeze
 
         TRANSIENT_ERRORS = LagoHttpClient::Client::TRANSIENT_ERROR_CLASSES
@@ -111,8 +121,7 @@ module PaymentProviders
         end
 
         def handle_duplicate
-          lookup = Transactions::FindByInvoiceNumberService.call(payment_provider:, invoice_number:)
-          earlier = lookup.transaction if lookup.success?
+          earlier = find_earlier_transaction
 
           if earlier.nil?
             # NOTE: An earlier attempt was sent but can't be found. Keep the payment
@@ -120,11 +129,24 @@ module PaymentProviders
             return apply_transaction(transaction_id: nil, status: "held_for_review", error_code: DUPLICATE_REASON_CODE)
           end
 
+          status = LISTED_STATUSES.fetch(earlier["transactionStatus"], "held_for_review")
+
           apply_transaction(
             transaction_id: earlier["transId"],
-            status: LISTED_STATUSES.fetch(earlier["transactionStatus"], "error"),
-            error_code: (DUPLICATE_REASON_CODE unless LISTED_STATUSES[earlier["transactionStatus"]] == "approved")
+            status:,
+            error_code: (DUPLICATE_REASON_CODE unless status == "approved")
           )
+        end
+
+        def find_earlier_transaction
+          LOOKUP_DELAYS_SECONDS.each do |delay|
+            sleep(delay) if delay.positive?
+
+            lookup = Transactions::FindByInvoiceNumberService.call(payment_provider:, invoice_number:)
+            return lookup.transaction if lookup.success? && lookup.transaction
+          end
+
+          nil
         end
 
         def apply_transaction(transaction_id:, status:, error_code: nil, error_message: nil)

@@ -114,9 +114,27 @@ RSpec.describe PaymentProviders::AuthorizeNet::Payments::CreateService do
     let(:listed) { JSON.parse(fixture("unsettled_transaction_list.json")) }
 
     before do
+      stub_const("#{described_class}::LOOKUP_DELAYS_SECONDS", [0, 0, 0, 0])
       stub_request(:post, api_url)
         .with(body: hash_including("getUnsettledTransactionListRequest"))
         .to_return { {status: 200, body: listed.to_json} }
+    end
+
+    context "when the earlier attempt shows in the list only on a later lookup" do
+      before do
+        empty = listed.merge("transactions" => [])
+        found = listed.deep_dup.tap { |list| list["transactions"][0]["invoiceNumber"] = invoice_number }
+
+        stub_request(:post, api_url)
+          .with(body: hash_including("getUnsettledTransactionListRequest"))
+          .to_return({status: 200, body: empty.to_json}, {status: 200, body: found.to_json})
+      end
+
+      it "records the earlier transaction" do
+        expect(result).to be_success
+        expect(result.payment).to have_attributes(provider_payment_id: "80042512399", status: "approved")
+        expect(WebMock).to have_requested(:post, api_url).with(body: hash_including("getUnsettledTransactionListRequest")).twice
+      end
     end
 
     context "when the earlier attempt was approved" do
@@ -144,9 +162,27 @@ RSpec.describe PaymentProviders::AuthorizeNet::Payments::CreateService do
       end
     end
 
+    context "when the earlier attempt has a status the provider does not know" do
+      before do
+        listed["transactions"][0]["invoiceNumber"] = invoice_number
+        listed["transactions"][0]["transactionStatus"] = "somethingNew"
+      end
+
+      it "keeps the payment processing so nothing charges again" do
+        expect(result).to be_success
+        expect(result.payment).to have_attributes(
+          provider_payment_id: "80042512399",
+          status: "held_for_review",
+          payable_payment_status: "processing",
+          error_code: "11"
+        )
+      end
+    end
+
     context "when the earlier attempt can't be found" do
       it "keeps the payment processing so nothing charges again" do
         expect(result).to be_success
+        expect(WebMock).to have_requested(:post, api_url).with(body: hash_including("getUnsettledTransactionListRequest")).times(4)
         expect(result.payment).to have_attributes(
           provider_payment_id: nil,
           status: "held_for_review",
