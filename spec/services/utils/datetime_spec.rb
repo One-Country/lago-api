@@ -5,6 +5,98 @@ require "rails_helper"
 RSpec.describe Utils::Datetime do
   subject(:datetime) { described_class }
 
+  describe ".datetime_like?" do
+    context "when the value is a datetime-like object" do
+      it "returns true for every datetime-like class" do
+        [Time.current.to_time, Time.current, Date.current, DateTime.now].each do |value|
+          expect(datetime.datetime_like?(value)).to be true
+        end
+      end
+    end
+
+    context "when the value is not datetime-like" do
+      it "returns false" do
+        expect(datetime.datetime_like?("2022-12-13")).to be false
+        expect(datetime.datetime_like?(123)).to be false
+        expect(datetime.datetime_like?(nil)).to be false
+      end
+    end
+  end
+
+  describe ".parse_iso8601" do
+    context "when the value is an ISO8601 string" do
+      let(:value) { "2022-12-13T12:00:00Z" }
+
+      it "returns the parsed datetime" do
+        expect(datetime.parse_iso8601(value)).to eq(DateTime.iso8601(value))
+      end
+    end
+
+    context "when the value is already date-like" do
+      it "returns the value unchanged for every datetime-like class" do
+        [Time.current.to_time, Time.current, Date.current, DateTime.now].each do |value|
+          expect(datetime.parse_iso8601(value)).to eq(value)
+        end
+      end
+    end
+
+    context "when the value is a malformed string" do
+      let(:value) { "not-a-date" }
+
+      it "returns nil" do
+        expect(datetime.parse_iso8601(value)).to be_nil
+      end
+    end
+
+    context "when the value raises a bare ArgumentError" do
+      let(:value) { "1" * 129 }
+
+      it "returns nil" do
+        expect(datetime.parse_iso8601(value)).to be_nil
+      end
+    end
+
+    context "when the value is not a string or date-like object" do
+      it "returns nil" do
+        expect(datetime.parse_iso8601(123)).to be_nil
+      end
+    end
+  end
+
+  describe ".parse_iso8601_date" do
+    context "when the value is an ISO8601 date string" do
+      let(:value) { "2022-12-13" }
+
+      it "returns the parsed date" do
+        expect(datetime.parse_iso8601_date(value)).to eq(Date.iso8601(value))
+      end
+    end
+
+    context "when the value is already date-like" do
+      it "returns it as a date for every datetime-like class" do
+        [Time.current.to_time, Time.current, Date.current, DateTime.now].each do |value|
+          expect(datetime.parse_iso8601_date(value)).to eq(value.to_date)
+        end
+      end
+    end
+
+    context "when the value is a malformed string" do
+      let(:value) { "not-a-date" }
+
+      it "returns nil" do
+        expect(datetime.parse_iso8601_date(value)).to be_nil
+      end
+    end
+
+    context "when the value raises a bare ArgumentError" do
+      let(:value) { "1" * 129 }
+
+      it "returns nil" do
+        expect(datetime.parse_iso8601_date(value)).to be_nil
+      end
+    end
+  end
+
   describe ".valid_format?" do
     context "when the parameter is a string" do
       context "when the date is not in ISO8601 format" do
@@ -24,11 +116,31 @@ RSpec.describe Utils::Datetime do
           expect(datetime).to be_valid_format("2024-05-30T09:45:44.394316274Z")
         end
       end
+
+      context "when the date raises a bare ArgumentError" do
+        it "returns false" do
+          expect(datetime).not_to be_valid_format("1" * 129)
+        end
+      end
+
+      context "when the date is in ISO8601 week-date format" do
+        it "returns false" do
+          expect(datetime).not_to be_valid_format("2022-W50-2")
+        end
+      end
+    end
+
+    context "when the parameter is neither a string nor a datetime object" do
+      it "returns false" do
+        expect(datetime).not_to be_valid_format(123)
+      end
     end
 
     context "when the parameter is a datetime object" do
-      it "returns true" do
-        expect(datetime).to be_valid_format(Time.current)
+      it "returns true for every datetime-like class" do
+        [Time.current.to_time, Time.current, Date.current, DateTime.now].each do |value|
+          expect(datetime).to be_valid_format(value)
+        end
       end
     end
 
@@ -82,6 +194,77 @@ RSpec.describe Utils::Datetime do
         it "returns false" do
           expect(datetime).not_to be_future_date(Time.current - 1.day)
         end
+      end
+    end
+  end
+
+  describe ".before_today?" do
+    context "when the date is before today" do
+      it "returns true" do
+        expect(datetime).to be_before_today("2022-12-13T12:00:00Z")
+        expect(datetime).to be_before_today("2022-12-13")
+        expect(datetime).to be_before_today(1.day.ago)
+      end
+    end
+
+    context "when the date falls inside today" do
+      it "returns false" do
+        expect(datetime).not_to be_before_today(Time.current.beginning_of_day)
+        expect(datetime).not_to be_before_today(Time.current.end_of_day)
+      end
+    end
+
+    context "when the date is in the future" do
+      it "returns false" do
+        expect(datetime).not_to be_before_today("2064-12-13T12:00:00Z")
+      end
+    end
+
+    context "when the format is invalid" do
+      it "returns false" do
+        expect(datetime).not_to be_before_today("aaa")
+        expect(datetime).not_to be_before_today(nil)
+      end
+    end
+
+    # The whole point of the option is that "today" is not the server's, so it is
+    # checked across the full range of world offsets and in both directions: west
+    # of UTC the caller is still on the previous date, east of it the caller has
+    # already turned over and the server's own date is that caller's yesterday.
+    {
+      "2026-09-15T01:00:00Z" => {
+        "Etc/GMT+12" => "2026-09-14",
+        "America/Sao_Paulo" => "2026-09-14",
+        "UTC" => "2026-09-15",
+        "Asia/Tokyo" => "2026-09-15",
+        "Pacific/Kiritimati" => "2026-09-15"
+      },
+      "2026-09-14T15:00:00Z" => {
+        "Etc/GMT+12" => "2026-09-14",
+        "America/Sao_Paulo" => "2026-09-14",
+        "UTC" => "2026-09-14",
+        "Asia/Tokyo" => "2026-09-15",
+        "Pacific/Kiritimati" => "2026-09-15"
+      }
+    }.each do |instant, today_by_zone|
+      context "when the clock reads #{instant}" do
+        around { |example| travel_to(Time.zone.parse(instant)) { example.run } }
+
+        today_by_zone.each do |timezone, today|
+          it "reads #{today} as today in #{timezone}" do
+            expect(datetime.before_today?(today, timezone:)).to be(false)
+            expect(datetime.before_today?(Date.parse(today).prev_day.iso8601, timezone:)).to be(true)
+          end
+        end
+      end
+    end
+
+    context "when no timezone is given" do
+      around { |example| travel_to(Time.utc(2026, 9, 15, 1, 0)) { example.run } }
+
+      it "measures the application day" do
+        expect(datetime).to be_before_today("2026-09-14")
+        expect(datetime).not_to be_before_today("2026-09-15")
       end
     end
   end

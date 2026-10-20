@@ -4,6 +4,7 @@ module Types
   class UserType < Types::BaseObject
     field :id, ID, null: false
 
+    field :cs_admin, Boolean, null: false
     field :email, String
     field :premium, Boolean, null: false
 
@@ -15,7 +16,7 @@ module Types
     field :updated_at, GraphQL::Types::ISO8601DateTime, null: false
 
     def memberships
-      object.memberships.active.includes(:organization)
+      object.memberships.active.includes(organization: :integrations)
     end
 
     def organizations

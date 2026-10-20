@@ -5,6 +5,11 @@ require "rails_helper"
 RSpec.describe Charge do
   subject(:charge) { create(:standard_charge) }
 
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:billable_metric) { create_default(:billable_metric) }
+  let_it_be(:plan) { create_default(:plan) }
+  let_it_be(:customer) { create_default(:customer) }
+
   it_behaves_like "paper_trail traceable"
 
   it { is_expected.to validate_presence_of(:code) }
@@ -15,6 +20,12 @@ RSpec.describe Charge do
       expect(subject).to have_many(:filters).dependent(:destroy)
       expect(subject).to have_one(:applied_pricing_unit)
       expect(subject).to have_one(:pricing_unit).through(:applied_pricing_unit)
+    end
+  end
+
+  describe "#target_key" do
+    it "returns the charge event-filter target key" do
+      expect(charge.target_key).to eq("charge-#{charge.id}")
     end
   end
 
@@ -634,6 +645,88 @@ RSpec.describe Charge do
     end
   end
 
+  describe "#presentation_group_keys_values_displayed_in_invoice" do
+    subject(:charge) { build(:standard_charge, properties:) }
+
+    context "when presentation_group_keys is blank" do
+      let(:properties) { {"amount_cents" => "1000"} }
+
+      it "returns an empty array" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq([])
+      end
+    end
+
+    context "when presentation_group_keys is an empty array" do
+      let(:properties) { {"amount_cents" => "1000", "presentation_group_keys" => []} }
+
+      it "returns an empty array" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq([])
+      end
+    end
+
+    context "when an element has options with display_in_invoice true" do
+      let(:properties) do
+        {
+          "amount_cents" => "1000",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => true}}
+          ]
+        }
+      end
+
+      it "returns the matching values" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq(["region"])
+      end
+    end
+
+    context "when an element has options with display_in_invoice false" do
+      let(:properties) do
+        {
+          "amount_cents" => "1000",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => false}}
+          ]
+        }
+      end
+
+      it "returns an empty array" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq([])
+      end
+    end
+
+    context "when only some elements have display_in_invoice true" do
+      let(:properties) do
+        {
+          "amount_cents" => "1000",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => true}},
+            {"value" => "country", "options" => {"display_in_invoice" => false}}
+          ]
+        }
+      end
+
+      it "returns only the values for entries with display_in_invoice true" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq(["region"])
+      end
+    end
+
+    context "when multiple elements have display_in_invoice true" do
+      let(:properties) do
+        {
+          "amount_cents" => "1000",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => true}},
+            {"value" => "department_id", "options" => {"display_in_invoice" => true}}
+          ]
+        }
+      end
+
+      it "returns all matching values" do
+        expect(charge.presentation_group_keys_values_displayed_in_invoice).to eq(["region", "department_id"])
+      end
+    end
+  end
+
   describe "#equal_properties?" do
     let(:charge1) { build(:standard_charge, properties: {amount: 100}) }
 
@@ -722,7 +815,8 @@ RSpec.describe Charge do
       end
 
       it "allows same code on different plans" do
-        create(:standard_charge, code: "my_code")
+        plan = create(:plan)
+        create(:standard_charge, code: "my_code", plan:)
         new_charge = build(:standard_charge, code: "my_code")
         expect(new_charge).to be_valid
       end
@@ -834,10 +928,6 @@ RSpec.describe Charge do
   end
 
   describe "#validate_accepts_target_wallet" do
-    let(:organization) { create(:organization) }
-    let(:plan) { create(:plan, organization:) }
-    let(:billable_metric) { create(:billable_metric, organization:) }
-
     context "when accepts_target_wallet is false" do
       it "is valid" do
         charge = build(:standard_charge, plan:, billable_metric:, accepts_target_wallet: false)
@@ -865,9 +955,9 @@ RSpec.describe Charge do
       end
 
       context "when feature is enabled", :premium do
-        before do
-          organization.update!(premium_integrations: ["events_targeting_wallets"])
-        end
+        let(:organization) { create(:organization, premium_integrations: ["events_targeting_wallets"]) }
+        let(:billable_metric) { create(:billable_metric, organization:) }
+        let(:plan) { create(:plan, organization:) }
 
         it "is valid" do
           charge = build(:standard_charge, plan:, billable_metric:, accepts_target_wallet: true)

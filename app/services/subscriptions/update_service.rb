@@ -2,6 +2,10 @@
 
 module Subscriptions
   class UpdateService < BaseService
+    include Subscriptions::Concerns::BillingEntityResolutionConcern
+    include Subscriptions::Concerns::FixedChargeUnitsOverrideDetectionConcern
+    include Subscriptions::Concerns::FixedChargeUnitsOverridePromotionConcern
+
     Result = BaseResult[:subscription, :payment_method]
 
     def initialize(subscription:, params:)
@@ -21,6 +25,10 @@ module Subscriptions
       return result.not_found_failure!(resource: "subscription") unless subscription
       return result.not_allowed_failure!(code: "subscription_incomplete") if subscription.incomplete?
 
+      if purchase_order_number_change_attempted? && !subscription.pending? && !subscription.active?
+        return result.not_allowed_failure!(code: "purchase_order_number_not_editable")
+      end
+
       unless valid?(
         customer: subscription.customer,
         plan: subscription.plan,
@@ -29,9 +37,12 @@ module Subscriptions
         on_termination_credit_note: params[:on_termination_credit_note],
         on_termination_invoice: params[:on_termination_invoice],
         payment_method: params[:payment_method],
+        connections: params[:connections],
         activation_rules: params[:activation_rules],
         subscription_type: "update",
-        subscription:
+        subscription:,
+        consolidate_invoice: params[:consolidate_invoice],
+        consolidate_invoice_provided: params.key?(:consolidate_invoice)
       )
         return result
       end
@@ -45,12 +56,20 @@ module Subscriptions
       end
 
       return result.forbidden_failure! if !License.premium? && params.key?(:plan_overrides)
+      return result.forbidden_failure! if connections_requested? && organization_flag_disabled?(:multi_connection)
+
+      if params.key?(:plan_overrides) && subscription.plan.organization.product_catalog_enabled?
+        return result.single_validation_failure!(field: :plan_overrides, error_code: "legacy_billing_disabled")
+      end
 
       ActiveRecord::Base.transaction do
         subscription.name = params[:name] if params.key?(:name)
         subscription.ending_at = params[:ending_at] if params.key?(:ending_at)
+        subscription.purchase_order_number = params[:purchase_order_number] if params.key?(:purchase_order_number)
         subscription.progressive_billing_disabled = params[:progressive_billing_disabled] if params.key?(:progressive_billing_disabled)
-        subscription.consolidate_invoice = params[:consolidate_invoice] if params.key?(:consolidate_invoice)
+        if params.key?(:consolidate_invoice)
+          subscription.consolidate_invoice = ActiveModel::Type::Boolean.new.cast(params[:consolidate_invoice])
+        end
 
         if pay_in_advance? && params.key?(:on_termination_credit_note)
           subscription.on_termination_credit_note = params[:on_termination_credit_note]
@@ -66,11 +85,15 @@ module Subscriptions
         end
 
         if params.key?(:billing_entity_id) || params.key?(:billing_entity_code)
-          new_billing_entity = resolve_billing_entity
-          subscription.billing_entity = new_billing_entity if new_billing_entity
+          new_billing_entity = resolve_billing_entity(organization: subscription.organization, params:)
+          subscription.billing_entity = new_billing_entity
         end
 
-        subscription.plan = handle_plan_override.plan if params.key?(:plan_overrides)
+        if units_only_plan_overrides_change?
+          apply_units_only_plan_overrides
+        elsif params.key?(:plan_overrides)
+          subscription.plan = handle_plan_override.plan
+        end
 
         if params.key?(:usage_thresholds)
           UpdateUsageThresholdsService.call!(subscription:, usage_thresholds_params: params[:usage_thresholds], partial: false)
@@ -94,7 +117,7 @@ module Subscriptions
             Invoices::CreatePayInAdvanceFixedChargesJob.perform_after_commit(subscription, Time.current.to_i)
           end
 
-          SendWebhookJob.perform_after_commit("subscription.updated", subscription)
+          notify_updated
 
           if subscription.should_sync_hubspot_subscription?
             Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob.perform_after_commit(subscription:)
@@ -102,6 +125,8 @@ module Subscriptions
         end
 
         InvoiceCustomSections::AttachToResourceService.call(resource: subscription, params:)
+
+        BillingObjectConnections::AttachToResourceService.call!(resource: subscription, params:)
       end
 
       result.subscription = subscription
@@ -118,6 +143,14 @@ module Subscriptions
 
     def pay_in_advance?
       subscription.plan.pay_in_advance?
+    end
+
+    # The attribute is normalized on assignment (see HasPurchaseOrderNumber), so a caller
+    # resending the stored value - or a blank or padded equivalent of it - is not changing it.
+    def purchase_order_number_change_attempted?
+      params.key?(:purchase_order_number) &&
+        Subscription.normalize_value_for(:purchase_order_number, params[:purchase_order_number]) !=
+          subscription.purchase_order_number
     end
 
     def subscription_at_changing_to_past?
@@ -154,18 +187,23 @@ module Subscriptions
           Invoices::CreatePayInAdvanceFixedChargesJob.perform_after_commit(subscription, subscription.started_at + 1.second)
         end
       end
+
+      # NOTE: Reaching this point means the subscription went from pending to active, so it emits
+      #       `subscription.started` like every other activation path, and `subscription.updated`
+      #       like every other edit going through this service.
+      notify_started
+      notify_updated
     end
 
-    def resolve_billing_entity
-      return nil unless subscription.organization.feature_flag_enabled?(:multi_entity_billing)
+    # Mirrors Subscriptions::ActivateService#notify_started, without the Hubspot sync.
+    def notify_started
+      SendWebhookJob.perform_after_commit("subscription.started", subscription)
+      Utils::ActivityLog.produce_after_commit(subscription, "subscription.started")
+    end
 
-      if params[:billing_entity_id].present?
-        subscription.organization.billing_entities.find(params[:billing_entity_id])
-      elsif params[:billing_entity_code].present?
-        subscription.organization.billing_entities.find_by!(code: params[:billing_entity_code])
-      end
-    rescue ActiveRecord::RecordNotFound
-      result.not_found_failure!(resource: "billing_entity").raise_if_error!
+    # The `subscription.updated` activity log is handled by the `activity_loggable` declaration.
+    def notify_updated
+      SendWebhookJob.perform_after_commit("subscription.updated", subscription)
     end
 
     def handle_plan_override
@@ -174,21 +212,91 @@ module Subscriptions
       if current_plan.parent_id
         Plans::UpdateService.call!(
           plan: current_plan,
-          params: params[:plan_overrides].to_h.with_indifferent_access
+          params: plan_update_params_with_full_fixed_charges(current_plan)
         )
       else
         Plans::OverrideService.call!(
           plan: current_plan,
-          params: params[:plan_overrides].to_h.with_indifferent_access,
+          params: plan_override_params_with_promoted_units,
           subscription:
         )
       end
+    end
+
+    def plan_override_params_with_promoted_units
+      override_params = params[:plan_overrides].to_h.with_indifferent_access
+      override_params[:fixed_charges] = promote_units_overrides_to_fixed_charges_params(
+        override_params[:fixed_charges] || []
+      )
+      override_params
+    end
+
+    def units_only_plan_overrides_change?
+      return @units_only_plan_overrides_change if defined?(@units_only_plan_overrides_change)
+
+      @units_only_plan_overrides_change = !subscription.plan.parent_id &&
+        params.key?(:plan_overrides) &&
+        units_only_fixed_charges_plan_overrides?(params[:plan_overrides])
+    end
+
+    def apply_units_only_plan_overrides
+      timestamp = Time.current.to_i
+
+      params[:plan_overrides][:fixed_charges].each do |entry|
+        entry = entry.to_h.symbolize_keys
+        fixed_charge = subscription.plan.fixed_charges.find_by(id: entry[:id])
+        result.not_found_failure!(resource: "fixed_charge").raise_if_error! unless fixed_charge
+
+        Subscriptions::FixedChargeUnitsOverrides::WriteService.call!(
+          subscription:,
+          fixed_charge:,
+          units: entry[:units],
+          apply_units_immediately: !!entry[:apply_units_immediately],
+          timestamp:
+        )
+      end
+    end
+
+    def plan_update_params_with_full_fixed_charges(plan)
+      payload = params[:plan_overrides].to_h.with_indifferent_access
+      return payload unless payload.key?(:fixed_charges)
+
+      fixed_charges_by_id = plan.fixed_charges.index_by(&:id)
+
+      overlays_by_id = payload[:fixed_charges].each_with_object({}) do |entry, acc|
+        entry_hash = entry.to_h.with_indifferent_access
+        id = entry_hash[:id]
+        result.not_found_failure!(resource: "fixed_charge").raise_if_error! unless fixed_charges_by_id.key?(id)
+        acc[id] = entry_hash.except(:id)
+      end
+
+      payload[:fixed_charges] = fixed_charges_by_id.values.map do |fc|
+        {
+          id: fc.id,
+          charge_model: fc.charge_model,
+          properties: fc.properties,
+          units: fc.units,
+          invoice_display_name: fc.invoice_display_name,
+          pay_in_advance: fc.pay_in_advance,
+          prorated: fc.prorated
+        }.with_indifferent_access.merge(overlays_by_id[fc.id] || {})
+      end
+
+      payload
     end
 
     def valid?(args)
       result.payment_method = payment_method
 
       Subscriptions::ValidateService.new(result, **args).valid?
+    end
+
+    def connections_requested?
+      params[:connections].present?
+    end
+
+    def organization_flag_disabled?(flag)
+      !subscription.organization.feature_flag_enabled?(flag)
     end
 
     def payment_method

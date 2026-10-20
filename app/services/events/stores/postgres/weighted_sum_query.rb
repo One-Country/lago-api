@@ -12,9 +12,12 @@ module Events
           <<-SQL
             #{events_cte_sql}
 
-            SELECT SUM(period_ratio) as aggregation
+            SELECT
+              SUM(period_ratio) as aggregation,
+              SUM(difference) as variation_with_initial,
+              COUNT(*) as rows_count
             FROM (
-              SELECT (#{period_ratio_sql}) AS period_ratio
+              SELECT (#{period_ratio_sql}) AS period_ratio, difference
               FROM events_data
             ) cumulated_ratios
           SQL
@@ -26,11 +29,14 @@ module Events
 
             SELECT
               #{group_names},
-              SUM(period_ratio) as aggregation
+              SUM(period_ratio) as aggregation,
+              SUM(difference) as variation_with_initial,
+              COUNT(*) as rows_count
             FROM (
               SELECT
                 #{group_names},
-                (#{grouped_period_ratio_sql}) AS period_ratio
+                (#{grouped_period_ratio_sql}) AS period_ratio,
+                difference
               FROM events_data
             ) cumulated_ratios
             GROUP BY #{group_names}
@@ -57,19 +63,19 @@ module Events
 
         attr_reader :store
 
-        delegate :events, :charges_duration, :sanitized_property_name, :created_at_ordering_column, to: :store
+        delegate :events, :charges_duration, :sanitized_property_name, :sanitized_group_name, :created_at_ordering_column, to: :store
 
         def events_cte_sql
           <<-SQL
             WITH events_data AS (
               (#{initial_value_sql})
-              UNION
+              UNION ALL
               (#{
                 events(ordered: true)
                   .select("timestamp, (#{sanitized_property_name})::numeric AS difference, #{created_at_ordering_column}")
                   .to_sql
               })
-              UNION
+              UNION ALL
               (#{end_of_period_value_sql})
             )
           SQL
@@ -114,19 +120,19 @@ module Events
 
         def grouped_events_cte_sql(initial_values)
           groups = store.grouped_by.map.with_index do |group, index|
-            "#{sanitized_property_name(group)} AS g_#{index}"
+            "#{sanitized_group_name(group)} AS g_#{index}"
           end
 
           <<-SQL
             WITH events_data AS (
               (#{grouped_initial_value_sql(initial_values)})
-              UNION
+              UNION ALL
               (#{
                 events(ordered: true)
                   .select("#{groups.join(", ")}, timestamp, (#{sanitized_property_name})::numeric AS difference, #{created_at_ordering_column}")
                   .to_sql
               })
-              UNION
+              UNION ALL
               (#{grouped_end_of_period_value_sql(initial_values)})
             )
           SQL
@@ -134,18 +140,10 @@ module Events
 
         def grouped_initial_value_sql(initial_values)
           values = initial_values.map do |initial_value|
-            groups = store.grouped_by.map do |g|
-              if initial_value[:groups][g]
-                "'#{ActiveRecord::Base.sanitize_sql_for_conditions(initial_value[:groups][g])}'"
-              else
-                "NULL"
-              end
-            end
-
             [
-              groups,
+              quoted_group_values(initial_value),
               "timestamp without time zone :from_datetime",
-              initial_value[:value],
+              quoted_initial_value(initial_value),
               "timestamp without time zone :from_datetime"
             ].flatten.join(", ")
           end
@@ -160,19 +158,11 @@ module Events
 
         def grouped_end_of_period_value_sql(initial_values)
           values = initial_values.map do |initial_value|
-            groups = store.grouped_by.map do |g|
-              if initial_value[:groups][g]
-                "'#{ActiveRecord::Base.sanitize_sql_for_conditions(initial_value[:groups][g])}'"
-              else
-                "NULL"
-              end
-            end
-
             [
-              groups,
-              "timestamp without time zone :from_datetime",
+              quoted_group_values(initial_value),
+              "timestamp without time zone :to_datetime",
               0,
-              "timestamp without time zone :from_datetime"
+              "timestamp without time zone :to_datetime"
             ].flatten.join(", ")
           end
 
@@ -182,6 +172,17 @@ module Events
               VALUES #{values.map { "(#{it})" }.join(", ")}
             ) AS t(#{group_names}, timestamp, difference, created_at)
           SQL
+        end
+
+        def quoted_group_values(initial_value)
+          store.grouped_by.map do |group|
+            value = initial_value[:groups][group]
+            value.present? ? ActiveRecord::Base.connection.quote(value.to_s) : "NULL"
+          end
+        end
+
+        def quoted_initial_value(initial_value)
+          "#{ActiveRecord::Base.connection.quote(initial_value[:value])}::numeric"
         end
 
         def grouped_period_ratio_sql

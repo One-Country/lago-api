@@ -6,17 +6,13 @@ RSpec.describe Integrations::Aggregator::Invoices::Hubspot::UpdateService do
   subject(:service_call) { service.call }
 
   let(:service) { described_class.new(invoice:) }
-  let(:integration) { create(:hubspot_integration, organization:, invoices_properties_version: 2) }
-  let(:integration_customer) { create(:hubspot_customer, integration:, customer:) }
-  let(:integration_invoice) { create(:integration_resource, syncable: invoice, integration:) }
-  let(:customer) { create(:customer, organization:) }
-  let(:organization) { create(:organization) }
   let(:lago_client) { instance_double(LagoHttpClient::Client) }
   let(:endpoint) { "https://api.nango.dev/v1/hubspot/records" }
   let(:invoice_file_url) { invoice.file_url }
   let(:file_url) { Faker::Internet.url }
   let(:due_date) { invoice.payment_due_date.strftime("%Y-%m-%d") }
-
+  let(:purchase_order_number) { "PO-123" }
+  let(:invoice_url_path) { "/#{organization.slug}/customer/#{customer.id}/invoice/#{invoice.id}/overview" }
   let(:invoice) do
     create(
       :invoice,
@@ -25,10 +21,10 @@ RSpec.describe Integrations::Aggregator::Invoices::Hubspot::UpdateService do
       coupons_amount_cents: 2000,
       prepaid_credit_amount_cents: 4000,
       credit_notes_amount_cents: 6000,
-      taxes_amount_cents: 8000
+      taxes_amount_cents: 8000,
+      purchase_order_number:
     )
   end
-
   let(:headers) do
     {
       "Connection-Id" => integration.connection_id,
@@ -36,10 +32,15 @@ RSpec.describe Integrations::Aggregator::Invoices::Hubspot::UpdateService do
       "Provider-Config-Key" => "hubspot"
     }
   end
-
   let(:params) do
     service.__send__(:payload).update_body
   end
+  let(:integration) { create(:hubspot_integration, organization:, invoices_properties_version: 2) }
+  let(:integration_customer) { create(:hubspot_customer, integration:, customer:) }
+  let(:integration_invoice) { create(:integration_resource, syncable: invoice, integration:) }
+
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
 
   before do
     allow(LagoHttpClient::Client).to receive(:new)
@@ -113,6 +114,22 @@ RSpec.describe Integrations::Aggregator::Invoices::Hubspot::UpdateService do
             expect(result.external_id).to eq("123456789")
           end
 
+          it "sends the invoice properties" do
+            service_call
+
+            expect(lago_client).to have_received(:put_with_response).with(
+              hash_including(
+                "input" => hash_including(
+                  "properties" => hash_including(
+                    "lago_invoice_purchase_order_number" => purchase_order_number,
+                    "lago_invoice_url" => a_string_ending_with(invoice_url_path)
+                  )
+                )
+              ),
+              headers
+            )
+          end
+
           it_behaves_like "throttles!", :hubspot
         end
 
@@ -167,7 +184,7 @@ RSpec.describe Integrations::Aggregator::Invoices::Hubspot::UpdateService do
           end
 
           it "returns result" do
-            expect(service_call).to be_a(BaseService::Result)
+            expect(service_call).to be_a(BaseResult)
           end
 
           it "enqueues a SendWebhookJob" do

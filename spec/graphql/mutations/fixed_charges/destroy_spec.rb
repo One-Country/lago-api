@@ -3,13 +3,11 @@
 require "rails_helper"
 
 RSpec.describe Mutations::FixedCharges::Destroy, type: :graphql do
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
   let(:required_permission) { "charges:delete" }
-  let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, add_on:) }
-
   let(:mutation) do
     <<~GQL
       mutation($input: DestroyFixedChargeInput!) {
@@ -19,6 +17,10 @@ RSpec.describe Mutations::FixedCharges::Destroy, type: :graphql do
       }
     GQL
   end
+
+  let_it_be(:membership, refind: true) { create_default(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create_default(:add_on, organization:) }
 
   it_behaves_like "requires current user"
   it_behaves_like "requires current organization"
@@ -47,10 +49,7 @@ RSpec.describe Mutations::FixedCharges::Destroy, type: :graphql do
     let(:child_plan) { create(:plan, organization:, parent: plan) }
     let(:child_fixed_charge) { create(:fixed_charge, plan: child_plan, organization:, add_on:, parent: fixed_charge) }
 
-    before do
-      child_fixed_charge
-      allow(FixedCharges::DestroyChildrenJob).to receive(:perform_later)
-    end
+    before { child_fixed_charge }
 
     it "cascades the deletion to children" do
       execute_graphql(
@@ -66,7 +65,7 @@ RSpec.describe Mutations::FixedCharges::Destroy, type: :graphql do
         }
       )
 
-      expect(FixedCharges::DestroyChildrenJob).to have_received(:perform_later).with(fixed_charge.id)
+      expect(FixedCharges::DestroyChildrenJob).to have_been_enqueued.with(fixed_charge.id)
     end
   end
 

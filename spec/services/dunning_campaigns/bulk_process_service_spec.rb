@@ -3,12 +3,16 @@
 require "rails_helper"
 
 RSpec.describe DunningCampaigns::BulkProcessService do
-  subject(:result) { described_class.call }
+  subject(:result) do
+    perform_enqueued_jobs(only: DunningCampaigns::ProcessCustomerJob) do
+      described_class.call
+    end
+  end
 
   let(:currency) { "EUR" }
 
   context "when premium features are enabled", :premium do
-    let(:organization) { create :organization, premium_integrations: %w[auto_dunning] }
+    let_it_be(:organization, refind: true) { create_default(:organization, premium_integrations: %w[auto_dunning]) }
     let(:billing_entity) { organization.default_billing_entity }
     let(:customer) { create :customer, organization:, billing_entity:, currency: }
 
@@ -32,6 +36,52 @@ RSpec.describe DunningCampaigns::BulkProcessService do
         payment_overdue: true,
         total_amount_cents: 1_00
       )
+    end
+
+    it "enqueues a ProcessCustomerJob for an eligible customer" do
+      invoice_1
+
+      expect { described_class.call }
+        .to have_enqueued_job(DunningCampaigns::ProcessCustomerJob)
+        .with(customer)
+    end
+
+    context "when customer eligibility changes after dispatch" do
+      let(:dunning_campaign) { create :dunning_campaign, organization:, max_attempts: 1 }
+      let(:dunning_campaign_threshold) do
+        create :dunning_campaign_threshold, dunning_campaign:, currency:, amount_cents: 50_00
+      end
+
+      before do
+        dunning_campaign_threshold
+        billing_entity.update!(applied_dunning_campaign: dunning_campaign)
+        invoice_1
+        described_class.call
+      end
+
+      context "when the customer is excluded" do
+        before { customer.update!(exclude_from_dunning_campaign: true) }
+
+        it "does not process the customer" do
+          expect { perform_enqueued_jobs(only: DunningCampaigns::ProcessCustomerJob) }
+            .to not_change { customer.reload.dunning_currency_attempts }
+            .and not_change { customer.reload.last_dunning_campaign_attempt_at }
+          expect(DunningCampaigns::ProcessAttemptJob).not_to have_been_enqueued
+          expect(SendWebhookJob).not_to have_been_enqueued
+        end
+      end
+
+      context "when auto dunning is disabled" do
+        before { organization.update!(premium_integrations: []) }
+
+        it "does not process the customer" do
+          expect { perform_enqueued_jobs(only: DunningCampaigns::ProcessCustomerJob) }
+            .to not_change { customer.reload.dunning_currency_attempts }
+            .and not_change { customer.reload.last_dunning_campaign_attempt_at }
+          expect(DunningCampaigns::ProcessAttemptJob).not_to have_been_enqueued
+          expect(SendWebhookJob).not_to have_been_enqueued
+        end
+      end
     end
 
     context "when billing_entity has an applied dunning campaign" do
@@ -62,7 +112,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
           expect(result).to be_success
           expect(DunningCampaigns::ProcessAttemptJob)
             .to have_been_enqueued
-            .with(customer:, dunning_campaign_threshold:)
+            .with(customer:, dunning_campaign_threshold:, billing_entity:)
         end
 
         it "increments the per-currency attempt counter" do
@@ -140,7 +190,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
             expect(result).to be_success
             expect(DunningCampaigns::ProcessAttemptJob)
               .to have_been_enqueued
-              .with(customer:, dunning_campaign_threshold:)
+              .with(customer:, dunning_campaign_threshold:, billing_entity:)
           end
         end
       end
@@ -214,7 +264,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
             expect(result).to be_success
             expect(DunningCampaigns::ProcessAttemptJob)
               .to have_been_enqueued
-              .with(customer:, dunning_campaign_threshold: customer_dunning_campaign_threshold)
+              .with(customer:, dunning_campaign_threshold: customer_dunning_campaign_threshold, billing_entity:)
           end
         end
 
@@ -321,7 +371,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
           expect(result).to be_success
           expect(DunningCampaigns::ProcessAttemptJob)
             .to have_been_enqueued
-            .with(customer:, dunning_campaign_threshold:)
+            .with(customer:, dunning_campaign_threshold:, billing_entity:)
         end
 
         context "when organization does not have auto_dunning feature enabled" do
@@ -391,7 +441,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
             expect(result).to be_success
             expect(DunningCampaigns::ProcessAttemptJob)
               .to have_been_enqueued
-              .with(customer:, dunning_campaign_threshold:)
+              .with(customer:, dunning_campaign_threshold:, billing_entity:)
           end
         end
       end
@@ -489,9 +539,9 @@ RSpec.describe DunningCampaigns::BulkProcessService do
         it "enqueues a ProcessAttemptJob for each currency" do
           result
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold)
+            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold, billing_entity:)
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold)
+            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold, billing_entity:)
         end
 
         it "increments per-currency counters independently" do
@@ -510,9 +560,9 @@ RSpec.describe DunningCampaigns::BulkProcessService do
         it "enqueues a ProcessAttemptJob only for the matching currency" do
           result
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold)
+            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold, billing_entity:)
           expect(DunningCampaigns::ProcessAttemptJob)
-            .not_to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold)
+            .not_to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold, billing_entity:)
         end
       end
 
@@ -525,7 +575,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
         it "only enqueues for currencies with matching thresholds" do
           result
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold)
+            .to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold, billing_entity:)
           expect(DunningCampaigns::ProcessAttemptJob)
             .to have_been_enqueued.once
         end
@@ -567,10 +617,10 @@ RSpec.describe DunningCampaigns::BulkProcessService do
 
       context "when all customers have overdue balances exceeding all thresholds" do
         before do
-          create(:invoice, organization:, customer: customer, currency:, payment_overdue: true, total_amount_cents: 100_00)
-          create(:invoice, organization:, customer: customer_1, currency:, payment_overdue: true, total_amount_cents: 60_00)
-          create(:invoice, organization:, customer: customer_2, currency:, payment_overdue: true, total_amount_cents: 51_00)
-          create(:invoice, organization:, customer: customer_3, currency:, payment_overdue: true, total_amount_cents: 51_00)
+          create(:invoice, organization:, customer:, billing_entity:, currency:, payment_overdue: true, total_amount_cents: 100_00)
+          create(:invoice, organization:, customer: customer_1, billing_entity: billing_entity_1, currency:, payment_overdue: true, total_amount_cents: 60_00)
+          create(:invoice, organization:, customer: customer_2, billing_entity: billing_entity_2, currency:, payment_overdue: true, total_amount_cents: 51_00)
+          create(:invoice, organization:, customer: customer_3, billing_entity:, currency:, payment_overdue: true, total_amount_cents: 51_00)
         end
 
         it "enqueues ProcessAttemptJob for both customers with their respective thresholds" do
@@ -578,11 +628,11 @@ RSpec.describe DunningCampaigns::BulkProcessService do
           expect(DunningCampaigns::ProcessAttemptJob)
             .not_to have_been_enqueued.with(hash_including(customer: customer))
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer: customer_1, dunning_campaign_threshold: dunning_campaign_threshold_1)
+            .to have_been_enqueued.with(customer: customer_1, dunning_campaign_threshold: dunning_campaign_threshold_1, billing_entity: billing_entity_1)
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer: customer_2, dunning_campaign_threshold: dunning_campaign_threshold_2)
+            .to have_been_enqueued.with(customer: customer_2, dunning_campaign_threshold: dunning_campaign_threshold_2, billing_entity: billing_entity_2)
           expect(DunningCampaigns::ProcessAttemptJob)
-            .to have_been_enqueued.with(customer: customer_3, dunning_campaign_threshold: dunning_campaign_threshold_1)
+            .to have_been_enqueued.with(customer: customer_3, dunning_campaign_threshold: dunning_campaign_threshold_1, billing_entity:)
         end
       end
     end
@@ -677,7 +727,7 @@ RSpec.describe DunningCampaigns::BulkProcessService do
       it "still enqueues the process attempt job" do
         result
         expect(DunningCampaigns::ProcessAttemptJob)
-          .to have_been_enqueued.with(customer:, dunning_campaign_threshold:)
+          .to have_been_enqueued.with(customer:, dunning_campaign_threshold:, billing_entity:)
       end
     end
 
@@ -708,9 +758,9 @@ RSpec.describe DunningCampaigns::BulkProcessService do
       it "only enqueues for the currency that has not reached max attempts" do
         result
         expect(DunningCampaigns::ProcessAttemptJob)
-          .not_to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold)
+          .not_to have_been_enqueued.with(customer:, dunning_campaign_threshold: usd_threshold, billing_entity:)
         expect(DunningCampaigns::ProcessAttemptJob)
-          .to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold)
+          .to have_been_enqueued.with(customer:, dunning_campaign_threshold: eur_threshold, billing_entity:)
       end
 
       it "only increments the non-maxed currency counter" do
@@ -798,6 +848,39 @@ RSpec.describe DunningCampaigns::BulkProcessService do
       it "does not enqueue any process attempt job" do
         result
         expect(DunningCampaigns::ProcessAttemptJob).not_to have_been_enqueued
+      end
+    end
+
+    context "when customer has overdue invoices across multiple billing entities" do
+      let(:other_billing_entity) { create :billing_entity, organization: }
+      let(:dunning_campaign) { create :dunning_campaign, organization:, max_attempts: 2 }
+      let(:dunning_campaign_threshold) do
+        create(:dunning_campaign_threshold, dunning_campaign:, currency:, amount_cents: 40_00)
+      end
+
+      before do
+        dunning_campaign_threshold
+        billing_entity.update!(applied_dunning_campaign: dunning_campaign)
+        create(:invoice, organization:, customer:, billing_entity:, currency:, payment_overdue: true, total_amount_cents: 50_00)
+        create(:invoice, organization:, customer:, billing_entity: other_billing_entity, currency:, payment_overdue: true, total_amount_cents: 60_00)
+      end
+
+      it "enqueues one ProcessAttemptJob per billing entity carrying overdue invoices in the currency" do
+        result
+        expect(DunningCampaigns::ProcessAttemptJob)
+          .to have_been_enqueued
+          .with(customer:, dunning_campaign_threshold:, billing_entity:)
+        expect(DunningCampaigns::ProcessAttemptJob)
+          .to have_been_enqueued
+          .with(customer:, dunning_campaign_threshold:, billing_entity: other_billing_entity)
+        expect(DunningCampaigns::ProcessAttemptJob)
+          .to have_been_enqueued.twice
+      end
+
+      it "increments the per-currency counter only once" do
+        result
+        customer.reload
+        expect(customer.dunning_currency_attempts).to eq(currency => 1)
       end
     end
 

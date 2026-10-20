@@ -8,6 +8,8 @@ RSpec.describe LagoHttpClient::Client do
   let(:url) { "http://example.com/api/v1/example" }
   let(:client_options) { {} }
 
+  before { stub_const("#{described_class}::RETRY_BACKOFF_RANGE", 0.0..0.0) }
+
   describe "#initialize" do
     it "parses the URL into a URI" do
       expect(client.uri).to eq URI("http://example.com/api/v1/example")
@@ -131,6 +133,36 @@ RSpec.describe LagoHttpClient::Client do
 
         it "raises immediately without retry" do
           expect { client.post({}, []) }.to raise_error(Net::WriteTimeout)
+        end
+      end
+    end
+
+    context "with max_retries set to zero" do
+      let(:server) { TCPServer.new("127.0.0.1", 0) }
+      let(:url) { "http://127.0.0.1:#{server.addr[1]}/stalled" }
+      let(:client_options) { {read_timeout: 0.1, max_retries: 0} }
+
+      before { WebMock.disable_net_connect!(allow_localhost: true) }
+
+      after do
+        WebMock.disable_net_connect!
+        server.close
+      end
+
+      def connections_made
+        count = 0
+        loop do
+          server.accept_nonblock.close
+          count += 1
+        end
+      rescue IO::WaitReadable
+        count
+      end
+
+      context "when the server never answers a GET" do
+        it "sends the request once" do
+          expect { client.get }.to raise_error(Net::ReadTimeout)
+          expect(connections_made).to eq(1)
         end
       end
     end
@@ -523,8 +555,8 @@ RSpec.describe LagoHttpClient::Client do
         stub_request(:post, url).to_raise(Net::OpenTimeout)
       end
 
-      it "raises NoMethodError due to nil response" do
-        expect { client.post({}, []) }.to raise_error(NoMethodError)
+      it "re-raises the original error after exhausting retries" do
+        expect { client.post({}, []) }.to raise_error(Net::OpenTimeout)
       end
     end
 
@@ -547,6 +579,237 @@ RSpec.describe LagoHttpClient::Client do
 
       it "raises the error immediately" do
         expect { client.post({}, []) }.to raise_error(Net::OpenTimeout)
+      end
+    end
+
+    context "with retry_on_transient_errors enabled" do
+      let(:client_options) { {retry_on_transient_errors: true} }
+
+      context "when the response is a 500 then succeeds" do
+        before do
+          call_count = 0
+          stub_request(:post, url).to_return do
+            call_count += 1
+            if call_count == 1
+              {body: "transient error", status: 500}
+            else
+              {body: "{}", status: 200}
+            end
+          end
+        end
+
+        it "retries and returns the parsed body" do
+          expect(client.post({}, [])).to eq({})
+        end
+      end
+
+      context "when the response is a 503 on every call" do
+        before do
+          stub_request(:post, url).to_return(body: "unavailable", status: 503)
+        end
+
+        it "raises an HttpError after exhausting retries" do
+          expect { client.post({}, []) }.to raise_error(LagoHttpClient::HttpError) do |error|
+            expect(error.error_code).to eq "503"
+          end
+        end
+      end
+
+      context "when a transient exception occurs then succeeds" do
+        before do
+          call_count = 0
+          stub_request(:post, url).to_return do
+            call_count += 1
+            if call_count == 1
+              raise Net::OpenTimeout
+            else
+              {body: "{}", status: 200}
+            end
+          end
+        end
+
+        it "retries and returns the parsed body" do
+          expect(client.post({}, [])).to eq({})
+        end
+      end
+
+      context "when an SSL error occurs then succeeds" do
+        before do
+          call_count = 0
+          stub_request(:post, url).to_return do
+            call_count += 1
+            if call_count == 1
+              raise OpenSSL::SSL::SSLError
+            else
+              {body: "{}", status: 200}
+            end
+          end
+        end
+
+        it "retries and returns the parsed body" do
+          expect(client.post({}, [])).to eq({})
+        end
+      end
+
+      context "when the response is a 4xx" do
+        it "raises an HttpError without retrying" do
+          stub = stub_request(:post, url).to_return(body: "Error", status: 422)
+
+          expect { client.post({}, []) }.to raise_error(LagoHttpClient::HttpError) do |error|
+            expect(error.error_code).to eq "422"
+          end
+          expect(stub).to have_been_requested.once
+        end
+      end
+
+      context "when a transient exception occurs on every call" do
+        let(:call_count) { {value: 0} }
+
+        before do
+          counter = call_count
+          stub_request(:post, url).to_return do
+            counter[:value] += 1
+            raise Errno::ECONNRESET
+          end
+        end
+
+        # Exception-path exhaustion goes through the `is_a?` branch of
+        # `transient_exception?`, distinct from the `retries_on.include?` branch.
+        it "re-raises the original error after exhausting retries" do
+          expect { client.post({}, []) }.to raise_error(Errno::ECONNRESET)
+        end
+
+        it "attempts exactly MAX_RETRIES_ATTEMPTS times" do
+          expect { client.post({}, []) }.to raise_error(Errno::ECONNRESET)
+          expect(call_count[:value]).to eq(described_class::MAX_RETRIES_ATTEMPTS)
+        end
+      end
+
+      context "when a retryable status is returned on every call" do
+        it "attempts exactly MAX_RETRIES_ATTEMPTS times" do
+          stub = stub_request(:post, url).to_return(body: "unavailable", status: 503)
+
+          expect { client.post({}, []) }.to raise_error(LagoHttpClient::HttpError)
+          expect(stub).to have_been_requested.times(described_class::MAX_RETRIES_ATTEMPTS)
+        end
+      end
+
+      context "when a non-transient exception occurs" do
+        before do
+          stub_request(:post, url).to_raise(ArgumentError)
+        end
+
+        # ArgumentError is neither in retries_on nor TRANSIENT_ERROR_CLASSES,
+        # so it must propagate immediately even with the flag enabled.
+        it "raises the error immediately without retrying" do
+          expect { client.post({}, []) }.to raise_error(ArgumentError)
+        end
+      end
+    end
+
+    context "with retry_on_transient_errors disabled (default)" do
+      let(:client_options) { {} }
+
+      it "raises an HttpError without retrying on a 500" do
+        stub = stub_request(:post, url).to_return(body: "Error", status: 500)
+
+        expect { client.post({}, []) }.to raise_error(LagoHttpClient::HttpError)
+        expect(stub).to have_been_requested.once
+      end
+    end
+  end
+
+  describe "private address protection" do
+    let(:url) { "https://hooks.example.com/lago" }
+    let(:client_options) { {block_private_addresses: true} }
+    let(:allow_private) { "false" }
+    let(:public_address) { Addrinfo.tcp("93.184.215.14", 0) }
+    let(:private_address) { Addrinfo.tcp("169.254.169.254", 0) }
+
+    before do
+      stub_const("ENV", ENV.to_h.merge("LAGO_WEBHOOK_ALLOW_PRIVATE_URLS" => allow_private))
+      allow(Addrinfo).to receive(:getaddrinfo).and_return([public_address])
+      stub_request(:post, url).to_return(body: "{}", status: 200)
+    end
+
+    context "when the host resolves to a public address" do
+      it "connects to the resolved address" do
+        client.post_with_response({}, {})
+
+        expect(client.send(:http_client).ipaddr).to eq("93.184.215.14")
+        expect(WebMock).to have_requested(:post, url)
+      end
+    end
+
+    context "when a plain HTTP URL goes through a proxy" do
+      let(:url) { "http://hooks.example.com:8080/lago" }
+      let(:pinned_url) { "http://93.184.215.14:8080/lago" }
+
+      before do
+        stub_const("ENV", ENV.to_h.merge("LAGO_WEBHOOK_ALLOW_PRIVATE_URLS" => allow_private, "http_proxy" => "http://proxy.test:3128"))
+        stub_request(:post, pinned_url).to_return(body: "{}", status: 200)
+      end
+
+      it "sends the request to the resolved address with the original Host header" do
+        client.post_with_response({}, {})
+
+        expect(client.send(:http_client).proxy_address).to eq("proxy.test")
+        expect(WebMock).to have_requested(:post, pinned_url).with(headers: {"Host" => "hooks.example.com:8080"})
+        expect(WebMock).not_to have_requested(:post, url)
+      end
+    end
+
+    context "when the host resolves to a private address" do
+      before { allow(Addrinfo).to receive(:getaddrinfo).and_return([private_address]) }
+
+      it "raises without sending the request" do
+        expect { client.post_with_response({}, {}) }.to raise_error(LagoHttpClient::BlockedAddressError)
+        expect(WebMock).not_to have_requested(:post, url)
+      end
+    end
+
+    context "when the host is an IPv6 loopback literal" do
+      let(:url) { "http://[::1]:8080/lago" }
+
+      before { allow(Addrinfo).to receive(:getaddrinfo).and_call_original }
+
+      it "raises without sending the request" do
+        expect { client.post_with_response({}, {}) }.to raise_error(LagoHttpClient::BlockedAddressError)
+        expect(Addrinfo).to have_received(:getaddrinfo).with("::1", nil, nil, :STREAM)
+      end
+    end
+
+    context "when the host rebinds to a private address after a first request" do
+      before do
+        allow(Addrinfo).to receive(:getaddrinfo).and_return([public_address], [private_address])
+      end
+
+      it "blocks the next request" do
+        client.post_with_response({}, {})
+
+        expect { client.post_with_response({}, {}) }.to raise_error(LagoHttpClient::BlockedAddressError)
+        expect(WebMock).to have_requested(:post, url).once
+      end
+    end
+
+    context "when private addresses are allowed" do
+      let(:allow_private) { "true" }
+
+      it "does not resolve the host" do
+        client.post_with_response({}, {})
+
+        expect(Addrinfo).not_to have_received(:getaddrinfo)
+        expect(WebMock).to have_requested(:post, url)
+      end
+    end
+
+    context "when the protection is not requested" do
+      let(:client_options) { {} }
+
+      it "does not resolve the host" do
+        client.post_with_response({}, {})
+
+        expect(Addrinfo).not_to have_received(:getaddrinfo)
       end
     end
   end

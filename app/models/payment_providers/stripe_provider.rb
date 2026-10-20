@@ -19,6 +19,7 @@ module PaymentProviders
       charge.refund.updated
       customer.updated
       charge.dispute.closed
+      customer_cash_balance_transaction.created
     ].freeze
 
     PROCESSING_STATUSES = %w[
@@ -31,15 +32,38 @@ module PaymentProviders
     FAILED_STATUSES = %w[canceled requires_payment_method].freeze
     SUPPORTED_EU_BANK_TRANSFER_COUNTRIES = %w[BE DE ES FR IE NL].freeze
 
+    # NOTE: retrying one of these can change the answer, so jobs talking to stripe retry them and
+    #       lookups let them propagate rather than acting on data they could not confirm.
+    TRANSIENT_ERRORS = [
+      ::Stripe::APIConnectionError,
+      ::Stripe::APIError,
+      ::Stripe::RateLimitError
+    ].freeze
+
+    # NOTE: retrying one of these never changes the answer, so a lookup that hits one falls back
+    #       to whatever it already has rather than failing the job.
+    PERMANENT_ERRORS = [
+      ::Stripe::AuthenticationError,
+      ::Stripe::InvalidRequestError,
+      ::Stripe::PermissionError
+    ].freeze
+
     validates :secret_key, presence: true
     validates :success_redirect_url, url: true, allow_nil: true, length: {maximum: 1024}
 
     settings_accessors :webhook_id
     secrets_accessors :secret_key
     settings_accessors :supports_3ds
+    settings_accessors :require_terms_of_service_consent, default: false
 
     def payment_type
       "stripe"
+    end
+
+    def retriable_authentication_failure?(error_code, payment:)
+      return false unless error_code == NEED_3DS_ERROR_CODE
+
+      supports_3ds.present? || payment.gated_subscription_activation?
     end
   end
 end

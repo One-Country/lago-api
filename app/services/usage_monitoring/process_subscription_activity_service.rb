@@ -11,6 +11,11 @@ module UsageMonitoring
     end
 
     def call
+      unless subscription.active?
+        subscription_activity.delete
+        return result
+      end
+
       exception_to_raise = nil
       lifetime_usage = find_or_create_lifetime_usage
 
@@ -32,14 +37,14 @@ module UsageMonitoring
       alerts = Alert.where(
         subscription_external_id: subscription.external_id,
         organization_id: subscription_activity.organization_id
-      ).includes(:thresholds).load
+      ).load
 
       alerts.each do |alert|
         case alert.alert_type
         when "lifetime_usage_amount"
           ProcessAlertService.call(alert:, alertable: subscription, current_metrics: lifetime_usage)
         when *Alert::BILLABLE_METRIC_LIFETIME_USAGE_TYPES
-          UsageMonitoring::ProcessLifetimeUsageAlertJob.set(wait: 5.minutes).perform_later(alert:, subscription:)
+          UsageMonitoring::ProcessLifetimeUsageAlertJob.set(wait: processing_interval).perform_later(alert:, subscription:)
         when *Alert::CURRENT_USAGE_TYPES
           ProcessAlertService.call(alert:, alertable: subscription, current_metrics: current_usage)
         end
@@ -62,12 +67,17 @@ module UsageMonitoring
 
     attr_reader :subscription_activity, :subscription
 
+    def processing_interval
+      (ENV["LAGO_SUBSCRIPTION_ACTIVITY_PROCESSING_INTERVAL_SECONDS"].presence || 1.minute).to_i.seconds
+    end
+
     def current_usage
       @current_usage ||= ::Invoices::CustomerUsageService.call(
         customer: subscription.customer,
         subscription:,
         apply_taxes: false, # Never use taxes for alerting
-        with_cache: true
+        with_cache: true,
+        use_usage_buckets: true
       ).usage
     end
 

@@ -1,0 +1,107 @@
+# frozen_string_literal: true
+
+require "rails_helper"
+
+RSpec.describe Auth::EntraId::AuthorizeService do
+  subject(:service) { described_class.new(email:) }
+
+  let(:organization) { create(:organization) }
+  let(:entra_id_integration) { create(:entra_id_integration) }
+  let(:email) { "foo@#{entra_id_integration.domain}" }
+
+  before { entra_id_integration }
+
+  describe "#authorize" do
+    it "returns an authorize url" do
+      result = service.call
+
+      expect(result).to be_success
+      expect(result.url).to include("login.microsoftonline.com")
+      expect(result.url).to include(entra_id_integration.tenant_id)
+      expect(result.url).to include(entra_id_integration.client_id)
+    end
+
+    context "when the email domain is an additional domain of the integration" do
+      let(:entra_id_integration) { create(:entra_id_integration, domain: "bosch.com", additional_domains: ["de.bosch.com"]) }
+      let(:email) { "Michael.Kolb3@DE.bosch.com" }
+
+      it "returns the authorize url of that integration" do
+        result = service.call
+
+        expect(result).to be_success
+        expect(result.url).to include(entra_id_integration.tenant_id)
+      end
+    end
+
+    context "when integrations exist whose primary domains differ only by casing" do
+      let(:entra_id_integration) { build(:entra_id_integration, domain: "example.com") }
+      let(:upper_integration) { build(:entra_id_integration, domain: "Example.com") }
+
+      before do
+        upper_integration.save!(validate: false)
+        entra_id_integration.save!(validate: false)
+      end
+
+      it "routes each spelling to the integration with the exact domain" do
+        lower_result = described_class.new(email: "foo@example.com").call
+        upper_result = described_class.new(email: "foo@Example.com").call
+
+        expect(lower_result.entra_id_integration).to eq(entra_id_integration)
+        expect(upper_result.entra_id_integration).to eq(upper_integration)
+      end
+
+      it "falls back to the oldest case-insensitive match for another spelling" do
+        result = described_class.new(email: "foo@EXAMPLE.COM").call
+
+        expect(result.entra_id_integration).to eq(upper_integration)
+      end
+    end
+
+    context "when domain is not configured with an integration" do
+      let(:email) { "foo@bar.com" }
+
+      it "returns a failure result" do
+        result = service.call
+
+        expect(result).not_to be_success
+        expect(result.error.messages.values.flatten).to include("domain_not_configured")
+      end
+    end
+
+    context "with invite token" do
+      subject(:service) { described_class.new(email:, invite_token: invite.token) }
+
+      let(:invite) { create(:invite, email:) }
+
+      it "returns an authorize url" do
+        result = service.call
+
+        expect(result).to be_success
+        expect(result.url).to include(entra_id_integration.tenant_id)
+        expect(result.url).to include(entra_id_integration.client_id)
+      end
+
+      context "when invite email is different from the email" do
+        let(:invite) { create(:invite, email: "foo@b.com") }
+
+        it "returns a failure result" do
+          result = service.call
+
+          expect(result).not_to be_success
+          expect(result.error.messages.values.flatten).to include("invite_email_mismatch")
+        end
+      end
+
+      context "when pending invite does not exists" do
+        let(:invite) { create(:invite, email:, status: :accepted) }
+
+        it "returns a failure result" do
+          result = service.call
+
+          expect(result).not_to be_success
+          expect(result.error.messages.values.flatten).to include("invite_not_found")
+        end
+      end
+    end
+  end
+end

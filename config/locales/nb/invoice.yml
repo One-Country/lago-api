@@ -21,6 +21,7 @@ nb:
     breakdown: Oversikt
     breakdown_for_days: "%{breakdown_duration} av %{breakdown_total_duration} dager"
     breakdown_of: Fordeling av %{fee_filter_display_name}
+    charges_paid_in_advance: Gebyrer betalt på forskudd
     clabe: CLABE
     conversion_rate: Valutakurs
     country: Land
@@ -38,7 +39,7 @@ nb:
       discount_reason: Rabatt %{tax_rate} andel
       payment_information: "%{payment_label} på %{currency} %{amount} brukt"
       standard_payment: Standardbetaling
-    fee_prorated: Avgiften beregnes forholdsmessig etter brukerdager, den viste enhetsprisen er et gjennomsnitt
+    fee_prorated: Avgiften beregnes forholdsmessig for perioden; den viste enhetsprisen er et gjennomsnitt
     fees_from_to_date: Gebyrer fra %{from_date} til %{to_date}
     free_credits: Gratis kreditter
     from_to_date: Fra %{from_date} til %{to_date}
@@ -58,7 +59,7 @@ nb:
     month: måned
     monthly: Månedlig
     notice_full: Uavhengig av når en hendelse mottas, blir enheten ikke forholdsmessig priset, vi belaster full pris.
-    notice_prorated: Hvis en enhet legges til eller fjernes i løpet av faktureringsperioden, beregner vi den proporsjonale prisen basert på forholdet mellom gjenværende eller brukte dager og det totale antallet dager i planen. For eksempel, hvis det er 15 dager igjen i planen, multipliserer vi prisen med 15/%{days_in_month}, og hvis en enhet ble brukt i 10 dager, multipliserer vi prisen med 10/%{days_in_month}.
+    notice_prorated: Hvis en enhet legges til eller fjernes i løpet av faktureringsperioden, beregner vi den proporsjonale prisen basert på forholdet mellom gjenværende eller brukte dager og det totale antallet dager i planen. For eksempel, hvis det er 15 dager igjen i en periode på %{days_in_month} dager, multipliserer vi prisen med 15/%{days_in_month}, og hvis en enhet ble brukt i 10 dager, multipliserer vi prisen med 10/%{days_in_month}.
     package:
       fee_per_package: Gebyr per pakke
       fee_per_package_unit_price: "%{amount} per %{package_size}"
@@ -80,6 +81,7 @@ nb:
     prepaid_credits: Forskuddsbetalte kreditter
     prepaid_credits_with_value: Forhåndsbetalte kreditter - %{wallet_name}
     progressive_billing_credit: Bruk allerede fakturert
+    purchase_order_number: Bestillingsnummer
     quarter: kvartal
     quarterly: Kvartalsvis
     reached_usage_threshold: Denne progressive faktureringen er generert fordi din akkumulerte bruk har nådd %{usage_amount}, og overskredet terskelen på %{threshold_amount}.
@@ -129,6 +131,7 @@ nb:
     units: Enheter
     units_prorated_per_period: Enheter proratert per sekund per %{period}
     usage_based_fees: Bruksbaserte kostnader
+    usage_breakdown_by: Bruksoversikt etter %{keys}
     volume:
       fee_per_unit: Gebyr per enhet
       flat_fee_for_all_units: Fast avgift for alle enheter

@@ -3,10 +3,16 @@
 require "rails_helper"
 
 RSpec.describe Integrations::Aggregator::Subscriptions::Hubspot::CreateJob do
+  before_all do
+    create_default(:organization)
+    create_default(:customer)
+    create_default(:plan)
+  end
+
   subject(:create_job) { described_class }
 
   let(:subscription) { create(:subscription) }
-  let(:result) { BaseService::Result.new }
+  let(:result) { Integrations::Aggregator::Subscriptions::Hubspot::CreateService::Result.new }
 
   before do
     allow(Integrations::Aggregator::Subscriptions::Hubspot::CreateService).to receive(:call).and_return(result)

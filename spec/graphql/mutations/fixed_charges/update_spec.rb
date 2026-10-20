@@ -3,13 +3,11 @@
 require "rails_helper"
 
 RSpec.describe Mutations::FixedCharges::Update, type: :graphql do
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
   let(:required_permission) { "charges:update" }
-  let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, add_on:) }
-
   let(:mutation) do
     <<~GQL
       mutation($input: FixedChargeUpdateInput!) {
@@ -26,6 +24,10 @@ RSpec.describe Mutations::FixedCharges::Update, type: :graphql do
       }
     GQL
   end
+
+  let_it_be(:membership, refind: true) { create_default(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create_default(:add_on, organization:) }
 
   it_behaves_like "requires current user"
   it_behaves_like "requires current organization"
@@ -65,7 +67,6 @@ RSpec.describe Mutations::FixedCharges::Update, type: :graphql do
     before do
       create(:subscription, plan: child_plan, status: :active)
       child_fixed_charge
-      allow(FixedCharges::UpdateChildrenJob).to receive(:perform_later)
     end
 
     it "passes cascade_updates to the service" do
@@ -87,7 +88,7 @@ RSpec.describe Mutations::FixedCharges::Update, type: :graphql do
         }
       )
 
-      expect(FixedCharges::UpdateChildrenJob).to have_received(:perform_later)
+      expect(FixedCharges::UpdateChildrenJob).to have_been_enqueued
     end
   end
 

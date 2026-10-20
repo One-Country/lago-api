@@ -5,10 +5,10 @@ require "rails_helper"
 RSpec.describe PaymentMethods::CreateFromProviderService do
   subject(:create_service) { described_class.new(customer:, params:, provider_method_id:, payment_provider_id:, payment_provider_customer:) }
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:membership) { create(:membership) }
+  let_it_be(:customer) { create(:customer, organization:) }
 
-  let(:customer) { create(:customer, organization:) }
   let(:params) {}
   let(:provider_method_id) { "i_cant_be_nil" }
   let(:payment_provider_id) { nil }
@@ -24,6 +24,16 @@ RSpec.describe PaymentMethods::CreateFromProviderService do
         expect(result).not_to be_success
         expect(result.error).to be_a(BaseService::NotFoundFailure)
         expect(result.error.message).to eq("customer_not_found")
+      end
+    end
+
+    context "when the advisory lock cannot be acquired" do
+      before do
+        allow(Customers::LockService).to receive(:call).and_raise(BaseLockService::FailedToAcquireLock)
+      end
+
+      it "raises a lock acquisition failure" do
+        expect { create_service.call }.to raise_error(BaseService::LockAcquisitionFailure)
       end
     end
 

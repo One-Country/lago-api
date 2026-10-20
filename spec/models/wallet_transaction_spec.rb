@@ -3,6 +3,11 @@
 require "rails_helper"
 
 RSpec.describe WalletTransaction do
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
+
+  it_behaves_like "a model with a purchase order number"
+
   describe "validations" do
     it { is_expected.to validate_presence_of(:priority) }
     it { is_expected.to validate_inclusion_of(:priority).in_range(1..50) }
@@ -44,6 +49,7 @@ RSpec.describe WalletTransaction do
     it { is_expected.to belong_to(:credit_note).optional }
     it { is_expected.to belong_to(:voided_invoice).class_name("Invoice").optional }
     it { is_expected.to belong_to(:organization) }
+    it { is_expected.to belong_to(:billing_entity).optional }
     it { is_expected.to have_many(:consumptions).class_name("WalletTransactionConsumption").with_foreign_key(:inbound_wallet_transaction_id).inverse_of(:inbound_wallet_transaction).dependent(:destroy) }
     it { is_expected.to have_many(:fundings).class_name("WalletTransactionConsumption").with_foreign_key(:outbound_wallet_transaction_id).inverse_of(:outbound_wallet_transaction).dependent(:destroy) }
     it { is_expected.to have_many(:applied_invoice_custom_sections).class_name("WalletTransaction::AppliedInvoiceCustomSection").dependent(:destroy) }
@@ -56,7 +62,7 @@ RSpec.describe WalletTransaction do
         "status" => hash_including("pending", "settled", "failed"),
         "transaction_status" => hash_including("purchased", "granted", "voided", "invoiced"),
         "transaction_type" => hash_including("inbound", "outbound"),
-        "source" => hash_including("manual", "interval", "threshold")
+        "source" => {"manual" => 0, "interval" => 1, "threshold" => 2, "x402" => 3}
       )
     end
   end
@@ -119,6 +125,19 @@ RSpec.describe WalletTransaction do
         purchased_10,
         invoiced_15
       ])
+    end
+  end
+
+  describe ".billable_metric_amount_key" do
+    let(:billable_metric_id) { "00000000-0000-4000-8000-000000000001" }
+
+    it "is the billable metric for usage that targeted no wallet" do
+      expect(described_class.billable_metric_amount_key(billable_metric_id, nil)).to eq(billable_metric_id)
+    end
+
+    it "adds the target wallet code for usage that targeted one" do
+      expect(described_class.billable_metric_amount_key(billable_metric_id, "wallet-x"))
+        .to eq("00000000-0000-4000-8000-000000000001/wallet-x")
     end
   end
 

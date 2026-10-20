@@ -7,14 +7,10 @@ RSpec.describe DataExports::Csv::CreditNotes do
     subject(:result) { described_class.new(data_export_part:).call }
 
     let(:data_export) { create(:data_export, resource_type: "credit_notes", organization:) }
-    let(:billing_entity) { create(:billing_entity) }
-    let(:organization) { billing_entity.organization }
     let(:credit_notes) { create_pair(:credit_note, billing_entity:) }
-
     let(:data_export_part) do
       create(:data_export_part, data_export:, object_ids: credit_notes.pluck(:id))
     end
-
     let(:expected_rows) do
       credit_notes.map do |credit_note|
         [
@@ -30,6 +26,7 @@ RSpec.describe DataExports::Csv::CreditNotes do
           credit_note.customer.tax_identification_number,
           credit_note.number,
           credit_note.invoice.number,
+          credit_note.invoice.purchase_order_number,
           credit_note.credit_status,
           credit_note.refund_status,
           credit_note.reason,
@@ -48,6 +45,9 @@ RSpec.describe DataExports::Csv::CreditNotes do
       end
     end
 
+    let(:organization) { create_default(:organization) }
+    let(:billing_entity) { create(:billing_entity) }
+
     before { create(:credit_note) }
 
     after do
@@ -57,9 +57,12 @@ RSpec.describe DataExports::Csv::CreditNotes do
     end
 
     it "adds serialized credit notes to csv" do
+      credit_notes.each { |credit_note| credit_note.invoice.update!(purchase_order_number: "PO-12345") }
+
       expect(result).to be_success
       parsed_rows = CSV.parse(result.csv_file, nil_value: "")
       expect(parsed_rows).to eq(expected_rows)
+      expect(parsed_rows.first).to include("PO-12345")
     end
 
     context "when organization has multiple billing_entities" do
@@ -82,6 +85,7 @@ RSpec.describe DataExports::Csv::CreditNotes do
           credit_note.customer.tax_identification_number,
           credit_note.number,
           credit_note.invoice.number,
+          credit_note.invoice.purchase_order_number,
           credit_note.credit_status,
           credit_note.refund_status,
           credit_note.reason,

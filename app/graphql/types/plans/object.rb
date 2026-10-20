@@ -8,18 +8,20 @@ module Types
       field :id, ID, null: false
       field :organization, Types::Organizations::OrganizationType
 
-      field :amount_cents, GraphQL::Types::BigInt, null: false
+      # Nullable: product-catalog plans price through their rate cards, so they
+      # carry no plan-level amount, interval or billing timing.
+      field :amount_cents, GraphQL::Types::BigInt
       field :amount_currency, Types::CurrencyEnum, null: false
       field :bill_charges_monthly, Boolean
       field :bill_fixed_charges_monthly, Boolean
       field :code, String, null: false
       field :description, String
-      field :interval, Types::Plans::IntervalEnum, null: false
+      field :interval, Types::Plans::IntervalEnum
       field :invoice_display_name, String
       field :minimum_commitment, Types::Commitments::Object, null: true
       field :name, String, null: false
       field :parent, Types::Plans::Object, null: true
-      field :pay_in_advance, Boolean, null: false
+      field :pay_in_advance, Boolean
       field :trial_period, Float
 
       field :applicable_usage_thresholds, [Types::UsageThresholds::Object]
@@ -27,7 +29,7 @@ module Types
 
       field :entitlements, [Types::Entitlement::PlanEntitlementObject]
 
-      field :activity_logs, [Types::ActivityLogs::Object], null: true
+      field :activity_logs, [Types::ActivityLogs::Object], null: true, permission: "audit_logs:view"
       field :charges, [Types::Charges::Object]
       field :fixed_charges, [Types::FixedCharges::Object]
       field :taxes, [Types::Taxes::Object]
@@ -74,19 +76,28 @@ module Types
         object.fixed_charges.order(created_at: :asc)
       end
 
+      def active_subscriptions_count
+        dataloader.with(Sources::PlanSubscriptionsCount, :active_subscriptions, object.organization_id).load(object.id)
+      end
+
       def charges_count
-        object.charges.count
+        dataloader.with(Sources::CountByForeignKey, Charge, :plan_id).load(object.id)
+      end
+
+      def customers_count
+        dataloader.with(Sources::PlanSubscriptionsCount, :customers, object.organization_id).load(object.id)
+      end
+
+      def draft_invoices_count
+        dataloader.with(Sources::PlanSubscriptionsCount, :draft_invoices, object.organization_id).load(object.id)
       end
 
       def fixed_charges_count
-        object.fixed_charges.count
+        dataloader.with(Sources::CountByForeignKey, FixedCharge, :plan_id).load(object.id)
       end
 
       def subscriptions_count
-        count = object.subscriptions.count
-        return count unless object.children
-
-        count + object.children.joins(:subscriptions).select("subscriptions.id").distinct.count
+        dataloader.with(Sources::PlanSubscriptionsCount, :subscriptions, object.organization_id).load(object.id)
       end
 
       def is_overridden

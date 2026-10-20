@@ -3,8 +3,6 @@
 require "rails_helper"
 
 RSpec.describe Invoices::Payments::GocardlessService do
-  subject(:gocardless_service) { described_class.new(argument) }
-
   let(:customer) { create(:customer, payment_provider_code: code) }
   let(:organization) { customer.organization }
   let(:gocardless_payment_provider) { create(:gocardless_provider, organization:, code:) }
@@ -13,7 +11,6 @@ RSpec.describe Invoices::Payments::GocardlessService do
   let(:gocardless_payments_service) { instance_double(GoCardlessPro::Services::PaymentsService) }
   let(:gocardless_mandates_service) { instance_double(GoCardlessPro::Services::MandatesService) }
   let(:gocardless_list_response) { instance_double(GoCardlessPro::ListResponse) }
-  let(:argument) { invoice }
   let(:code) { "gocardless_1" }
 
   let(:invoice) do
@@ -27,7 +24,7 @@ RSpec.describe Invoices::Payments::GocardlessService do
     )
   end
 
-  describe "#update_payment_status" do
+  describe ".call(:update_payment_status)" do
     let(:payment) do
       create(
         :payment,
@@ -43,7 +40,8 @@ RSpec.describe Invoices::Payments::GocardlessService do
     end
 
     it "updates the payment and invoice payment_status" do
-      result = gocardless_service.update_payment_status(
+      result = described_class.call(
+        :update_payment_status,
         provider_payment_id: "ch_123456",
         status: "paid_out"
       )
@@ -60,16 +58,40 @@ RSpec.describe Invoices::Payments::GocardlessService do
 
     it "enqueues a SendWebhookJob for payment.succeeded" do
       expect do
-        gocardless_service.update_payment_status(
+        described_class.call(
+          :update_payment_status,
           provider_payment_id: "ch_123456",
           status: "paid_out"
         )
       end.to have_enqueued_job(SendWebhookJob).with("payment.succeeded", Payment)
     end
 
+    it_behaves_like "syncs payment" do
+      let(:service_call) do
+        described_class.call(
+          :update_payment_status,
+          provider_payment_id: "ch_123456",
+          status: "paid_out"
+        )
+      end
+    end
+
+    context "when the customer has no accounting integration" do
+      it "does not enqueue an accounting payment sync job" do
+        expect do
+          described_class.call(
+            :update_payment_status,
+            provider_payment_id: "ch_123456",
+            status: "paid_out"
+          )
+        end.not_to have_enqueued_job(Integrations::Aggregator::Payments::CreateJob)
+      end
+    end
+
     context "when status is failed" do
       it "updates the payment and invoice status" do
-        result = gocardless_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
           provider_payment_id: "ch_123456",
           status: "failed"
         )
@@ -82,13 +104,31 @@ RSpec.describe Invoices::Payments::GocardlessService do
           ready_for_payment_processing: true
         )
       end
+
+      context "when the customer has an accounting integration syncing payments" do
+        let(:integration) { create(:netsuite_integration, organization:, sync_payments: true) }
+        let(:integration_customer) { create(:netsuite_customer, integration:, customer:) }
+
+        before { integration_customer }
+
+        it "does not enqueue an accounting payment sync job" do
+          expect do
+            described_class.call(
+              :update_payment_status,
+              provider_payment_id: "ch_123456",
+              status: "failed"
+            )
+          end.not_to have_enqueued_job(Integrations::Aggregator::Payments::CreateJob)
+        end
+      end
     end
 
     context "when invoice is already payment_succeeded" do
       before { invoice.payment_succeeded! }
 
       it "does not update the status of invoice and payment" do
-        result = gocardless_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
           provider_payment_id: "ch_123456",
           status: "paid_out"
         )
@@ -100,7 +140,8 @@ RSpec.describe Invoices::Payments::GocardlessService do
 
     context "with invalid status" do
       it "does not update the payment_status of invoice" do
-        result = gocardless_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
           provider_payment_id: "ch_123456",
           status: "foo-bar"
         )
@@ -109,25 +150,6 @@ RSpec.describe Invoices::Payments::GocardlessService do
         expect(result.error).to be_a(BaseService::ValidationFailure)
         expect(result.error.messages.keys).to include(:payable_payment_status)
         expect(result.error.messages[:payable_payment_status]).to include("value_is_invalid")
-      end
-    end
-
-    context "when invoice is not passed to constructor" do
-      let(:argument) { nil }
-
-      it "updates the payment and invoice payment_status" do
-        result = gocardless_service.update_payment_status(
-          provider_payment_id: "ch_123456",
-          status: "paid_out"
-        )
-
-        expect(result).to be_success
-        expect(result.payment.status).to eq("paid_out")
-        expect(result.payment.payable_payment_status).to eq("succeeded")
-        expect(result.invoice.reload).to have_attributes(
-          payment_status: "succeeded",
-          ready_for_payment_processing: false
-        )
       end
     end
   end

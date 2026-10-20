@@ -21,6 +21,7 @@ fr:
     breakdown: Détails de consommation
     breakdown_for_days: "%{breakdown_duration} sur %{breakdown_total_duration} jours"
     breakdown_of: Détails de consommation de %{fee_filter_display_name}
+    charges_paid_in_advance: Frais payés à l'avance
     clabe: CLABE
     conversion_rate: Taux de conversion
     country: Pays
@@ -38,7 +39,7 @@ fr:
       discount_reason: Remise %{tax_rate} part
       payment_information: "%{payment_label} de %{currency} %{amount} appliqué"
       standard_payment: Paiement standard
-    fee_prorated: Les frais sont calculés au prorata des jours d'utilisation, le prix unitaire affiché est une moyenne
+    fee_prorated: Les frais sont calculés au prorata de la période ; le prix unitaire affiché est une moyenne
     fees_from_to_date: Frais de conso. du %{from_date} au %{to_date}
     free_credits: Crédits gratuits
     from_to_date: Du %{from_date} au %{to_date}
@@ -58,7 +59,7 @@ fr:
     month: mois
     monthly: mensuel
     notice_full: Peu importe quand l’évènement de consommation est reçu, l'unité n'est pas proratisée et nous facturons le prix complet.
-    notice_prorated: Si une unité est ajoutée ou supprimée pendant la période de facturation, nous calculons le prix au prorata en fonction du ratio des jours restants ou utilisés. Par exemple, s'il reste 15 jours dans le plan, nous multiplions le prix par 15/%{days_in_month}, et si une unité a été utilisée pendant 10 jours, nous multiplions le prix par 10/%{days_in_month}.
+    notice_prorated: Si une unité est ajoutée ou supprimée pendant la période de facturation, nous calculons le prix au prorata en fonction du ratio des jours restants ou utilisés. Par exemple, s'il reste 15 jours sur une période de %{days_in_month} jours, nous multiplions le prix par 15/%{days_in_month}, et si une unité a été utilisée pendant 10 jours, nous multiplions le prix par 10/%{days_in_month}.
     package:
       fee_per_package: Frais par tranche
       fee_per_package_unit_price: "%{amount} par tranche de %{package_size}"
@@ -80,6 +81,7 @@ fr:
     prepaid_credits: Crédit(s) prépayé(s)
     prepaid_credits_with_value: Crédit(s) prépayé(s) - %{wallet_name}
     progressive_billing_credit: Usage déjà facturé
+    purchase_order_number: Nº de bon de commande
     quarter: trimestre
     quarterly: trimestriellement
     reached_usage_threshold: Cette facturation progressive est générée car votre usage cumulé a atteint %{usage_amount}, dépassant le seuil de %{threshold_amount}.
@@ -129,6 +131,7 @@ fr:
     units: Unités
     units_prorated_per_period: Unités proratisées par seconde par %{period}
     usage_based_fees: Frais de consommation
+    usage_breakdown_by: Détail de la consommation par %{keys}
     volume:
       fee_per_unit: Frais par unité
       flat_fee_for_all_units: Frais fixes pour toutes les unités

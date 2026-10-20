@@ -2,8 +2,36 @@
 
 module Utils
   class Datetime
+    def self.datetime_like?(value)
+      value.respond_to?(:strftime)
+    end
+
+    def self.parse_iso8601(datetime)
+      return datetime if datetime_like?(datetime)
+      return unless datetime.is_a?(String)
+
+      DateTime.iso8601(datetime)
+    # Date::Error inherits from ArgumentError so it is caught here too.
+    # A bare ArgumentError is raised e.g. for strings longer than 128 chars
+    # ("string length exceeds the limit 128").
+    rescue ArgumentError
+      nil
+    end
+
+    def self.parse_iso8601_date(date)
+      return date.to_date if datetime_like?(date)
+      return unless date.is_a?(String)
+
+      Date.iso8601(date)
+    # Date::Error inherits from ArgumentError so it is caught here too.
+    # A bare ArgumentError is raised e.g. for strings longer than 128 chars
+    # ("string length exceeds the limit 128").
+    rescue ArgumentError
+      nil
+    end
+
     def self.valid_format?(datetime, format: :iso8601)
-      return true if datetime.respond_to?(:strftime)
+      return true if datetime_like?(datetime)
       return false unless datetime.is_a?(String)
 
       case format
@@ -22,6 +50,15 @@ module Utils
 
       parsed_date = Time.zone.parse(datetime.to_s)
       parsed_date&.future? || false
+    end
+
+    def self.before_today?(datetime, timezone: Time.zone.name)
+      zone = Time.find_zone(timezone) || Time.zone
+
+      parsed = datetime.is_a?(ActiveSupport::TimeWithZone) ? datetime : nil
+      parsed ||= zone.parse(datetime.to_s) if valid_format?(datetime, format: :any)
+
+      parsed.present? && parsed < zone.now.beginning_of_day
     end
 
     def self.date_diff_with_timezone(from_datetime, to_datetime, timezone)

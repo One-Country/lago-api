@@ -14,7 +14,7 @@ RSpec.describe WebhooksController do
     end
 
     let(:payload) { event.merge(code:) }
-    let(:result) { BaseService::Result.new }
+    let(:result) { InboundWebhooks::CreateService::Result.new }
 
     before do
       allow(InboundWebhooks::CreateService)
@@ -66,7 +66,7 @@ RSpec.describe WebhooksController do
   end
 
   describe "POST /gocardless" do
-    let(:organization) { create(:organization) }
+    let_it_be(:organization) { create_default(:organization) }
 
     let(:gocardless_provider) do
       create(
@@ -84,7 +84,7 @@ RSpec.describe WebhooksController do
     end
 
     let(:result) do
-      result = BaseService::Result.new
+      result = PaymentProviders::Gocardless::HandleIncomingWebhookService::Result.new
       result.events = events["events"].map { |event| GoCardlessPro::Resources::Event.new(event) }
       result
     end
@@ -117,7 +117,7 @@ RSpec.describe WebhooksController do
 
     context "when failing to handle gocardless event" do
       let(:result) do
-        BaseService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
+        PaymentProviders::Gocardless::HandleIncomingWebhookService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
       end
 
       it "returns a bad request" do
@@ -138,7 +138,7 @@ RSpec.describe WebhooksController do
   end
 
   describe "POST /adyen" do
-    let(:organization) { create(:organization) }
+    let_it_be(:organization) { create_default(:organization) }
 
     let(:adyen_provider) do
       create(:adyen_provider, organization:)
@@ -150,8 +150,8 @@ RSpec.describe WebhooksController do
     end
 
     let(:result) do
-      result = BaseService::Result.new
-      result.body = body
+      result = PaymentProviders::Adyen::HandleIncomingWebhookService::Result.new
+      result.event = body
       result
     end
 
@@ -180,7 +180,7 @@ RSpec.describe WebhooksController do
 
     context "when failing to handle adyen event" do
       let(:result) do
-        BaseService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
+        PaymentProviders::Adyen::HandleIncomingWebhookService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
       end
 
       it "returns a bad request" do
@@ -199,7 +199,7 @@ RSpec.describe WebhooksController do
   end
 
   describe "POST /cashfree" do
-    let(:organization) { create(:organization) }
+    let_it_be(:organization) { create_default(:organization) }
 
     let(:cashfree_provider) do
       create(:cashfree_provider, organization:)
@@ -211,8 +211,8 @@ RSpec.describe WebhooksController do
     end
 
     let(:result) do
-      result = BaseService::Result.new
-      result.body = body
+      result = PaymentProviders::Cashfree::HandleIncomingWebhookService::Result.new
+      result.event = body
       result
     end
 
@@ -246,7 +246,7 @@ RSpec.describe WebhooksController do
 
     context "when failing to handle cashfree event" do
       let(:result) do
-        BaseService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
+        PaymentProviders::Cashfree::HandleIncomingWebhookService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
       end
 
       it "returns a bad request" do
@@ -276,7 +276,7 @@ RSpec.describe WebhooksController do
       JSON.parse(File.read(path))
     end
 
-    let(:result) { BaseService::Result.new }
+    let(:result) { InboundWebhooks::CreateService::Result.new }
 
     before do
       allow(InboundWebhooks::CreateService)
@@ -329,7 +329,7 @@ RSpec.describe WebhooksController do
   end
 
   describe "POST /flutterwave" do
-    let(:organization) { create(:organization) }
+    let_it_be(:organization) { create_default(:organization) }
 
     let(:flutterwave_provider) do
       create(:flutterwave_provider, organization:)
@@ -368,8 +368,8 @@ RSpec.describe WebhooksController do
     end
 
     let(:result) do
-      result = BaseService::Result.new
-      result.body = body
+      result = PaymentProviders::Flutterwave::HandleIncomingWebhookService::Result.new
+      result.event = body
       result
     end
 
@@ -401,7 +401,7 @@ RSpec.describe WebhooksController do
 
     context "when failing to handle flutterwave event" do
       let(:result) do
-        BaseService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
+        PaymentProviders::Flutterwave::HandleIncomingWebhookService::Result.new.service_failure!(code: "webhook_error", message: "Invalid payload")
       end
 
       it "returns bad request status" do

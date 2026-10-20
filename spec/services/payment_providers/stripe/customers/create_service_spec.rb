@@ -4,21 +4,19 @@ require "rails_helper"
 
 RSpec.describe PaymentProviders::Stripe::Customers::CreateService do
   let(:create_service) { described_class.new(customer:, payment_provider_id:, params:, async:) }
-
-  let(:customer) { create(:customer) }
   let(:stripe_provider) { create(:stripe_provider, organization: customer.organization) }
   let(:payment_provider_id) { stripe_provider.id }
   let(:params) { {provider_customer_id: "id", sync_with_provider: true, provider_payment_methods:} }
   let(:async) { true }
-
   let(:provider_payment_methods) { %w[card] }
-  let(:feature_flags) { ["multiple_payment_methods"] }
+
+  before_all do
+    create_default(:organization)
+  end
+
+  let_it_be(:customer) { create(:customer) }
 
   describe ".call" do
-    before do
-      customer.organization.update!(feature_flags:)
-    end
-
     it "creates a payment_provider_customer" do
       result = create_service.call
 
@@ -169,15 +167,6 @@ RSpec.describe PaymentProviders::Stripe::Customers::CreateService do
           it "enqueues FetchDefaultPaymentMethodJob" do
             expect { create_service.call }
               .to have_enqueued_job(PaymentProviders::Stripe::Customers::FetchDefaultPaymentMethodJob)
-          end
-
-          context "without feature flag" do
-            let(:feature_flags) { [] }
-
-            it "does not enqueue FetchDefaultPaymentMethodJob" do
-              expect { create_service.call }
-                .not_to have_enqueued_job(PaymentProviders::Stripe::Customers::FetchDefaultPaymentMethodJob)
-            end
           end
         end
 

@@ -5,9 +5,28 @@ require "rails_helper"
 RSpec.describe Invoice do
   subject(:invoice) { create(:invoice, organization:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:billable_metric) { create_default(:billable_metric) }
+  let_it_be(:add_on) { create_default(:add_on) }
 
   it_behaves_like "paper_trail traceable"
+  it_behaves_like "a model with a purchase order number"
+
+  describe "associations" do
+    it do
+      expect(invoice).to have_many(:billing_segments)
+      expect(invoice).to have_many(:contracts).through(:billing_segments)
+      expect(invoice).to belong_to(:x402_connection).class_name("X402::Connection").optional
+      expect(invoice).to have_many(:x402_settlements).class_name("X402::Settlement").inverse_of(:invoice)
+    end
+
+    it "returns each contract once across multiple billing segments" do
+      contract = create(:contract, organization:, customer: invoice.customer)
+      create_list(:billing_segment, 2, contract:, invoice:, organization:, customer: invoice.customer)
+
+      expect(invoice.contracts).to eq([contract])
+    end
+  end
 
   it { is_expected.to have_many(:integration_resources) }
   it { is_expected.to have_many(:error_details) }
@@ -23,6 +42,29 @@ RSpec.describe Invoice do
   it { is_expected.to have_many(:applied_usage_thresholds) }
   it { is_expected.to have_many(:usage_thresholds).through(:applied_usage_thresholds) }
   it { is_expected.to have_one(:regenerated_invoice).class_name("Invoice").with_foreign_key(:voided_invoice_id) }
+  it { is_expected.to have_many(:invoice_connections).dependent(:destroy) }
+  it { is_expected.to have_one(:payment_connection).class_name("InvoiceConnection") }
+  it { is_expected.to have_one(:tax_connection).class_name("InvoiceConnection") }
+  it { is_expected.to have_one(:accounting_connection).class_name("InvoiceConnection") }
+  it { is_expected.to have_one(:crm_connection).class_name("InvoiceConnection") }
+
+  describe "per-category connection snapshots" do
+    subject(:invoice) { create(:invoice, organization:, customer:) }
+
+    let(:customer) { create(:customer, organization:) }
+    let!(:payment) { create(:invoice_connection, invoice:, organization:, category: :payment) }
+    let!(:tax) do
+      create(:invoice_connection, invoice:, organization:, category: :tax, payment_provider_customer: nil,
+        integration_customer: create(:anrok_customer, customer:, organization:))
+    end
+
+    it "exposes each snapshot by category" do
+      expect(invoice.payment_connection).to eq(payment)
+      expect(invoice.tax_connection).to eq(tax)
+      expect(invoice.accounting_connection).to be_nil
+      expect(invoice.crm_connection).to be_nil
+    end
+  end
 
   describe "Clickhouse associations", clickhouse: true do
     it { is_expected.to have_many(:activity_logs).class_name("Clickhouse::ActivityLog") }
@@ -33,8 +75,27 @@ RSpec.describe Invoice do
 
   it "has fixed status mapping" do
     expect(described_class::VISIBLE_STATUS).to match(draft: 0, finalized: 1, voided: 2, failed: 4, pending: 7)
-    expect(described_class::INVISIBLE_STATUS).to match(generating: 3, open: 5, closed: 6)
-    expect(described_class::STATUS).to match(draft: 0, finalized: 1, voided: 2, generating: 3, failed: 4, open: 5, closed: 6, pending: 7)
+    expect(described_class::INVISIBLE_STATUS).to match(generating: 3, open: 5, closed: 6, deleted: 8)
+    expect(described_class::STATUS).to match(draft: 0, finalized: 1, voided: 2, generating: 3, failed: 4, open: 5, closed: 6, pending: 7, deleted: 8)
+  end
+
+  describe "deleted status" do
+    it "is invisible and not a generated status" do
+      invoice = create(:invoice, :deleted)
+
+      expect(invoice).to be_invisible
+      expect(described_class.invisible).to include(invoice)
+      expect(described_class.visible).not_to include(invoice)
+      expect(described_class::GENERATED_INVOICE_STATUSES).not_to include("deleted")
+    end
+
+    it "can be reached from draft but not from finalized" do
+      draft = create(:invoice, :draft)
+      finalized = create(:invoice, status: :finalized)
+
+      expect(draft.may_mark_as_deleted?).to be(true)
+      expect(finalized.may_mark_as_deleted?).to be(false)
+    end
   end
 
   describe "validation" do
@@ -87,6 +148,223 @@ RSpec.describe Invoice do
         end
       end
     end
+
+    describe "x402_connection validation" do
+      subject(:invoice) { build(:invoice, organization:, x402_connection_id: connection.id) }
+
+      let(:connection) { create(:x402_connection, organization:) }
+
+      before { invoice.valid? }
+
+      it { expect(invoice.errors.messages[:x402_connection]).to be_empty }
+
+      context "with a connection of another organization" do
+        let(:connection) { create(:x402_connection, organization: create(:organization)) }
+
+        it { expect(invoice.errors.messages[:x402_connection]).to eq(["must_belong_to_same_organization"]) }
+      end
+
+      context "with a discarded connection of another organization" do
+        let(:connection) { create(:x402_connection, :discarded, organization: create(:organization)) }
+
+        it { expect(invoice.errors.messages[:x402_connection]).to eq(["must_belong_to_same_organization"]) }
+      end
+    end
+  end
+
+  describe "x402_connection" do
+    subject(:invoice) { create(:invoice, organization:, x402_connection_id: connection.id) }
+
+    let(:connection) { create(:x402_connection, :discarded, organization:) }
+
+    it "reads a discarded connection as none" do
+      reloaded = described_class.find(invoice.id)
+
+      expect(reloaded.x402_connection).to be_nil
+      expect(reloaded.x402_connection_id).to eq(connection.id)
+    end
+
+    context "with an unknown connection" do
+      subject(:invoice) { build(:invoice, organization:, x402_connection_id: SecureRandom.uuid) }
+
+      it { expect { invoice.save! }.to raise_error(ActiveRecord::InvalidForeignKey) }
+    end
+  end
+
+  describe "x402_payment_token uniqueness" do
+    subject(:duplicate) { build(:invoice, organization:, x402_payment_token:) }
+
+    let(:x402_payment_token) { "x402-token" }
+    let(:existing_token) { "x402-token" }
+
+    before { create(:invoice, organization:, x402_payment_token: existing_token) }
+
+    it "refuses a second invoice with the token" do
+      expect { duplicate.save! }.to raise_error(ActiveRecord::RecordNotUnique, /index_invoices_on_x402_payment_token/)
+    end
+
+    context "without a token" do
+      let(:x402_payment_token) { nil }
+      let(:existing_token) { nil }
+
+      it { expect(duplicate.save).to be(true) }
+    end
+  end
+
+  describe "#x402_payment_refusal" do
+    subject(:x402_payment_refusal) { invoice.x402_payment_refusal }
+
+    let(:customer) { create(:customer, organization:) }
+    let(:invoice) { create(:invoice, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+    let(:wallet) { create(:wallet, customer:, currency: "USD", x402_enabled: true) }
+
+    before { wallet }
+
+    it { is_expected.to be_nil }
+
+    context "with an open credit invoice" do
+      let(:invoice) { create(:invoice, :open, :credit, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+      it { is_expected.to eq("invalid_invoice_status_or_payment_status") }
+    end
+
+    context "with a draft invoice" do
+      let(:invoice) { create(:invoice, :draft, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+      it { is_expected.to eq("invalid_invoice_status_or_payment_status") }
+    end
+
+    context "with a voided invoice" do
+      let(:invoice) { create(:invoice, :voided, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+      it { is_expected.to eq("invalid_invoice_status_or_payment_status") }
+    end
+
+    context "with a paid invoice" do
+      let(:invoice) do
+        create(:invoice, organization:, customer:, currency: "USD", total_amount_cents: 1_000, payment_status: "succeeded")
+      end
+
+      it { is_expected.to eq("invalid_invoice_status_or_payment_status") }
+    end
+
+    context "with a failed payment" do
+      let(:invoice) do
+        create(:invoice, organization:, customer:, currency: "USD", total_amount_cents: 1_000, payment_status: "failed")
+      end
+
+      it { is_expected.to be_nil }
+    end
+
+    context "with nothing left to pay" do
+      let(:invoice) do
+        create(:invoice, organization:, customer:, currency: "USD", total_amount_cents: 1_000, total_paid_amount_cents: 1_000)
+      end
+
+      it { is_expected.to eq("invalid_invoice_status_or_payment_status") }
+    end
+
+    context "with a non-USD invoice" do
+      let(:invoice) { create(:invoice, organization:, customer:, currency: "EUR", total_amount_cents: 1_000) }
+
+      it { is_expected.to eq("invoice_currency_not_supported") }
+    end
+
+    context "without an x402 wallet" do
+      let(:wallet) { create(:wallet, customer:, currency: "USD") }
+
+      it { is_expected.to eq("wallet_not_x402_enabled") }
+    end
+
+    context "with a terminated x402 wallet" do
+      let(:wallet) { create(:wallet, :terminated, customer:, currency: "USD", x402_enabled: true) }
+
+      it { is_expected.to eq("wallet_not_x402_enabled") }
+    end
+
+    context "with a pending x402 attempt" do
+      before { create(:x402_settlement, :invoice_payment, :pending, invoice:) }
+
+      it { is_expected.to eq("invoice_payment_pending") }
+    end
+
+    context "with a failed x402 attempt" do
+      before { create(:x402_settlement, :invoice_payment, :failed, invoice:) }
+
+      it { is_expected.to be_nil }
+    end
+
+    context "with a settled x402 attempt" do
+      before { create(:x402_settlement, :invoice_payment, invoice:) }
+
+      it { is_expected.to eq("invoice_payment_pending") }
+    end
+
+    context "with a settled x402 attempt recorded as a payment" do
+      before { create(:x402_settlement, :invoice_payment, invoice:, payment: create(:payment, payable: invoice)) }
+
+      it { is_expected.to be_nil }
+    end
+
+    context "with the credit invoice of an x402 credit purchase" do
+      let(:invoice) { create(:invoice, :credit, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+      before { create(:wallet_transaction, wallet:, invoice:, source: :x402) }
+
+      it { is_expected.to eq("invoice_payment_pending") }
+    end
+
+    context "with the credit invoice of a manual credit purchase" do
+      let(:invoice) { create(:invoice, :credit, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+      before { create(:wallet_transaction, wallet:, invoice:, source: :manual) }
+
+      it { is_expected.to be_nil }
+    end
+  end
+
+  describe "#x402_payment_eligible?" do
+    subject(:x402_payment_eligible?) { invoice.x402_payment_eligible? }
+
+    let(:customer) { create(:customer, organization:) }
+    let(:invoice) { create(:invoice, organization:, customer:, currency: "USD", total_amount_cents: 1_000) }
+
+    before { create(:wallet, customer:, currency: "USD", x402_enabled: true) }
+
+    it { is_expected.to be(true) }
+
+    context "with a non-USD invoice" do
+      let(:invoice) { create(:invoice, organization:, customer:, currency: "EUR", total_amount_cents: 1_000) }
+
+      it { is_expected.to be(false) }
+    end
+  end
+
+  describe "#x402_payment_url" do
+    subject(:x402_payment_url) { invoice.x402_payment_url }
+
+    let(:invoice) { build(:invoice, organization:, x402_payment_token: "ab" * 32) }
+    let(:api_url) { "https://api.example.com" }
+
+    before { stub_const("ENV", ENV.to_hash.merge("LAGO_API_URL" => api_url)) }
+
+    it { is_expected.to eq("https://api.example.com/x402/invoice_payments/#{"ab" * 32}") }
+
+    context "with a trailing slash on LAGO_API_URL" do
+      let(:api_url) { "https://api.example.com/" }
+
+      it { is_expected.to eq("https://api.example.com/x402/invoice_payments/#{"ab" * 32}") }
+    end
+
+    context "without a token" do
+      let(:invoice) { build(:invoice, organization:) }
+
+      it { is_expected.to be_nil }
+    end
+  end
+
+  it_behaves_like "a model with a purchase order number" do
+    subject { build(:invoice) }
   end
 
   describe "finalized_at" do
@@ -97,6 +375,31 @@ RSpec.describe Invoice do
         invoice.finalized!
 
         expect(invoice.finalized_at).to eq(Time.current)
+      end
+    end
+  end
+
+  describe "#progressive_billing_last_applied_usage_threshold" do
+    context "when invoice is progressive billing" do
+      let(:invoice) { create(:invoice, invoice_type: :progressive_billing) }
+
+      it "returns the last applied usage threshold" do
+        create(:applied_usage_threshold, invoice:, organization:, created_at: 2.days.ago)
+        applied_usage_threshold = create(:applied_usage_threshold, invoice:, organization:, created_at: 1.day.ago)
+
+        expect(invoice.progressive_billing_last_applied_usage_threshold).to eq(applied_usage_threshold)
+      end
+
+      it "returns nil when no applied usage threshold exists" do
+        expect(invoice.progressive_billing_last_applied_usage_threshold).to be_nil
+      end
+    end
+
+    context "when invoice is not progressive billing" do
+      it "returns nil" do
+        create(:applied_usage_threshold, invoice:, organization:)
+
+        expect(invoice.progressive_billing_last_applied_usage_threshold).to be_nil
       end
     end
   end
@@ -173,9 +476,47 @@ RSpec.describe Invoice do
       end
     end
 
-    context "with invoices on other organization" do
+    context "when the same customer has invoices across multiple billing entities" do
+      let(:billing_entity_2) { create(:billing_entity, organization:) }
+
       before do
-        create(:invoice, sequential_id: 1, organization_sequential_id: 0)
+        create(:invoice, customer:, organization:, billing_entity:, sequential_id: 1, billing_entity_sequential_id: 1, organization_sequential_id: 0)
+        create(:invoice, customer:, organization:, billing_entity:, sequential_id: 2, billing_entity_sequential_id: 2, organization_sequential_id: 0)
+        create(:invoice, customer:, organization:, billing_entity: billing_entity_2, sequential_id: 1, billing_entity_sequential_id: 1, organization_sequential_id: 0)
+      end
+
+      it "scopes sequential_id per (customer, billing_entity)" do
+        invoice_in_entity_2 = build(
+          :invoice,
+          customer:,
+          organization:,
+          billing_entity: billing_entity_2,
+          billing_entity_sequential_id: nil,
+          organization_sequential_id: 0,
+          status: :generating
+        )
+        invoice_in_entity_2.save!
+        invoice_in_entity_2.finalized!
+
+        invoice.save!
+        invoice.finalized!
+
+        expect(invoice_in_entity_2.sequential_id).to eq(2)
+        expect(invoice.sequential_id).to eq(3)
+      end
+    end
+
+    context "with invoices on other organization" do
+      let(:other_organization) { create(:organization) }
+
+      before do
+        create(
+          :invoice,
+          organization: other_organization,
+          customer: create(:customer, organization: other_organization),
+          sequential_id: 1,
+          organization_sequential_id: 0
+        )
       end
 
       it "scopes the sequence to the organization" do
@@ -249,6 +590,26 @@ RSpec.describe Invoice do
 
     it "returns only the invoices that are ready for refresh" do
       expect(described_class.ready_to_be_refreshed.pluck(:id)).to include(invoices[0].id)
+    end
+  end
+
+  describe ".with_active_contracts" do
+    let(:customer) { create(:customer, organization:) }
+    let(:active_invoice) { create(:invoice, organization:, customer:) }
+    let(:pending_invoice) { create(:invoice, organization:, customer:) }
+    let(:terminated_invoice) { create(:invoice, organization:, customer:) }
+
+    before do
+      active_contract = create(:contract, organization:, customer:)
+      pending_contract = create(:contract, :pending, organization:, customer:)
+      terminated_contract = create(:contract, :terminated, organization:, customer:)
+      create(:billing_segment, organization:, customer:, contract: active_contract, invoice: active_invoice)
+      create(:billing_segment, organization:, customer:, contract: pending_contract, invoice: pending_invoice)
+      create(:billing_segment, organization:, customer:, contract: terminated_contract, invoice: terminated_invoice)
+    end
+
+    it "returns invoices related to active contracts" do
+      expect(described_class.with_active_contracts).to eq([active_invoice])
     end
   end
 
@@ -808,13 +1169,210 @@ RSpec.describe Invoice do
   describe "#fee_total_amount_cents" do
     let(:organization) { create(:organization, name: "LAGO") }
     let(:customer) { create(:customer, organization:) }
-    let(:invoice) { create(:invoice, customer:, organization:) }
+    let(:invoice) { create(:invoice, customer:, organization:, fees_amount_cents: 233, coupons_amount_cents:, taxes_amount_cents:) }
+    let(:coupons_amount_cents) { 0 }
+    let(:taxes_amount_cents) { 47 }
 
-    it "returns the fee amount vat included" do
+    before do
       create(:fee, invoice:, amount_cents: 100, taxes_rate: 20)
       create(:fee, invoice:, amount_cents: 133, taxes_rate: 20)
+    end
 
-      expect(invoice.fee_total_amount_cents).to eq(120 + 160)
+    it "returns the fee amount vat included" do
+      expect(invoice.fee_total_amount_cents).to eq(233 + 47)
+    end
+
+    context "with a coupon" do
+      let(:coupons_amount_cents) { 33 }
+      let(:taxes_amount_cents) { 40 }
+
+      it "adds the tax computed after the coupon" do
+        expect(invoice.fee_total_amount_cents).to eq(233 + 40)
+      end
+    end
+
+    context "with provider taxes booked above the rate" do
+      let(:taxes_amount_cents) { 50 }
+
+      it "adds the booked tax" do
+        expect(invoice.fee_total_amount_cents).to eq(233 + 50)
+      end
+    end
+  end
+
+  describe "#booked_tax_by_fee_tax" do
+    subject(:booked_tax) { invoice.booked_tax_by_fee_tax }
+
+    let(:invoice) { create(:invoice, taxes_amount_cents:) }
+    let(:taxes_amount_cents) { 2 }
+    let(:fees) do
+      Array.new(4) { |index| create(:fee, invoice:, amount_cents: [6, 3, 3, 3][index], created_at: index.minutes.from_now) }
+    end
+    let(:booked_cents) { [0, 0, 1, 1] }
+    let(:exact_cents) { [0.6, 0.3, 0.3, 0.3] }
+    let(:invoice_taxes) { [create(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code: "sales", tax_rate: 10, amount_cents: taxes_amount_cents)] }
+    let(:fee_taxes) do
+      fees.each_with_index.map do |fee, index|
+        create(:fee_applied_tax, fee:, tax: nil, tax_code: "sales", tax_rate: 10, amount_cents: booked_cents[index], precise_amount_cents: exact_cents[index])
+      end
+    end
+
+    before do
+      invoice_taxes
+      fee_taxes
+    end
+
+    it "returns the booked rows when they add up to their invoice tax" do
+      expect(booked_tax).to eq(fee_taxes.zip([0, 0, 1, 1]).to_h)
+      expect(invoice.booked_tax_by_fee).to eq(fees.zip([0, 0, 1, 1]).to_h)
+    end
+
+    context "when the booked rows do not add up to their invoice tax" do
+      let(:booked_cents) { [1, 0, 0, 0] }
+
+      it "splits the invoice tax by the exact row amounts" do
+        expect(booked_tax).to eq(fee_taxes.zip([1, 1, 0, 0]).to_h)
+        expect(invoice.booked_tax_by_fee).to eq(fees.zip([1, 1, 0, 0]).to_h)
+      end
+    end
+
+    context "when every row was booked without an exact amount" do
+      let(:taxes_amount_cents) { 3 }
+      let(:booked_cents) { [1, 1, 0, 0] }
+      let(:exact_cents) { [0, 0, 0, 0] }
+
+      it "splits the invoice tax by the booked row amounts" do
+        expect(booked_tax).to eq(fee_taxes.zip([2, 1, 0, 0]).to_h)
+      end
+    end
+
+    context "with several invoice taxes" do
+      let(:fees) { Array.new(2) { |index| create(:fee, invoice:, created_at: index.minutes.from_now) } }
+      let(:invoice_tax_cents) { {"state" => 1, "county" => 1} }
+      let(:invoice_taxes) do
+        invoice_tax_cents.map do |tax_code, amount_cents|
+          create(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code:, tax_rate: tax_rates.fetch(tax_code), amount_cents:)
+        end
+      end
+      let(:tax_rates) { {"state" => 15, "county" => 10} }
+      let(:row_cents) { {"state" => [1, 0.6], "county" => [0, 0.4]} }
+      let(:fee_taxes) do
+        row_cents.to_h do |tax_code, (amount_cents, precise_amount_cents)|
+          rows = fees.map do |fee|
+            create(:fee_applied_tax, fee:, tax: nil, tax_code:, tax_rate: tax_rates.fetch(tax_code), amount_cents:, precise_amount_cents:)
+          end
+          [tax_code, rows]
+        end
+      end
+
+      context "when the rows add up in total but not per invoice tax" do
+        it "keeps what each invoice tax charged" do
+          expect(booked_tax.values_at(*fee_taxes["state"])).to eq([1, 0])
+          expect(booked_tax.values_at(*fee_taxes["county"])).to eq([1, 0])
+          expect(invoice.booked_tax_by_fee).to eq(fees.first => 2, fees.last => 0)
+        end
+      end
+
+      context "when the invoice taxes do not add up to the invoice tax" do
+        let(:taxes_amount_cents) { 3 }
+        let(:row_cents) { {"state" => [1, 1.2], "county" => [1, 0.6]} }
+
+        it "splits the invoice tax across invoice taxes by exact amounts" do
+          expect(booked_tax.values_at(*fee_taxes["state"])).to eq([1, 1])
+          expect(booked_tax.values_at(*fee_taxes["county"])).to eq([1, 0])
+        end
+      end
+    end
+
+    context "when a fee has several rows" do
+      let(:taxes_amount_cents) { 4 }
+      let(:fees) { Array.new(2) { |index| create(:fee, invoice:, created_at: index.minutes.from_now) } }
+      let(:tax_codes) { %w[state county city district] }
+      let(:invoice_taxes) do
+        tax_codes.map { |tax_code| create(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code:, tax_rate: 12.5, amount_cents: 1) }
+      end
+      let(:fee_taxes) do
+        tax_codes.flat_map do |tax_code|
+          fees.map { |fee| create(:fee_applied_tax, fee:, tax: nil, tax_code:, tax_rate: 12.5, amount_cents: 1, precise_amount_cents: 0.5) }
+        end
+      end
+
+      it "sums each fee's rows from the same split" do
+        expect(invoice.booked_tax_by_fee_tax.values).to eq([1, 1, 1, 1, 0, 0, 0, 0])
+        expect(invoice.booked_tax_by_fee).to eq(fees.first => 4, fees.last => 0)
+      end
+    end
+
+    context "when a fee has no tax rows" do
+      let(:taxes_amount_cents) { 3 }
+      let(:invoice_taxes) { [create(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code: "sales", tax_rate: 10, amount_cents: 1)] }
+      let(:fees) { [create(:fee, invoice:), create(:fee, invoice:, taxes_amount_cents: 1, taxes_precise_amount_cents: 1.6)] }
+      let(:fee_taxes) do
+        [create(:fee_applied_tax, fee: fees.first, tax: nil, tax_code: "sales", tax_rate: 10, amount_cents: 1, precise_amount_cents: 1.4)]
+      end
+
+      it "books the fee's own tax as one unit" do
+        expect(booked_tax).to eq(fee_taxes.first => 1, fees.last => 2)
+        expect(invoice.booked_tax_by_fee).to eq(fees.first => 1, fees.last => 2)
+      end
+    end
+
+    context "when a row matches no invoice tax" do
+      let(:taxes_amount_cents) { 3 }
+      let(:invoice_taxes) { [create(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code: "sales", tax_rate: 10, amount_cents: 1)] }
+      let(:fees) { Array.new(2) { |index| create(:fee, invoice:, created_at: index.minutes.from_now) } }
+      let(:fee_taxes) do
+        [
+          create(:fee_applied_tax, fee: fees.first, tax: nil, tax_code: "sales", tax_rate: 10, amount_cents: 1, precise_amount_cents: 1.2),
+          create(:fee_applied_tax, fee: fees.last, tax: nil, tax_code: "city", tax_rate: 5, amount_cents: 1, precise_amount_cents: 1.8)
+        ]
+      end
+
+      it "splits the invoice tax with the matched invoice taxes" do
+        expect(booked_tax).to eq(fee_taxes.first => 1, fee_taxes.last => 2)
+      end
+    end
+
+    context "when the rows carry no amount at all" do
+      let(:booked_cents) { [0, 0, 0, 0] }
+      let(:exact_cents) { [0, 0, 0, 0] }
+
+      it "still books the invoice tax on the first rows" do
+        expect(booked_tax).to eq(fee_taxes.zip([1, 1, 0, 0]).to_h)
+      end
+    end
+
+    context "when the invoice taxes are native" do
+      let(:invoice_taxes) { [create(:invoice_applied_tax, invoice:, tax_code: "sales", tax_rate: 10, amount_cents: taxes_amount_cents)] }
+      let(:fees) do
+        Array.new(4) { |index| create(:fee, invoice:, taxes_amount_cents: [1, 0, 0, 1][index], created_at: index.minutes.from_now) }
+      end
+
+      it "books each fee's own tax" do
+        expect(invoice.booked_tax_by_fee).to eq(fees.zip([1, 0, 0, 1]).to_h)
+      end
+    end
+
+    context "when the invoice is not saved" do
+      let(:invoice) { build(:invoice, taxes_amount_cents: 1) }
+      let(:invoice_taxes) { [build(:invoice_applied_tax, invoice:, tax: nil, taxable_base_amount_cents: 100, tax_code: "sales", tax_rate: 10, amount_cents: 1)] }
+      let(:fees) { Array.new(2) { build(:fee, invoice:) } }
+      let(:fee_taxes) do
+        fees.map do |fee|
+          build(:fee_applied_tax, fee:, tax: nil, tax_code: "sales", tax_rate: 10, amount_cents: 1, precise_amount_cents: 0.5)
+            .tap { |fee_tax| fee.applied_taxes << fee_tax }
+        end
+      end
+
+      before do
+        invoice.fees = fees
+        invoice.applied_taxes = invoice_taxes
+      end
+
+      it "keys the split by record" do
+        expect(booked_tax).to eq(fee_taxes.first => 1, fee_taxes.last => 0)
+        expect(invoice.booked_tax_by_fee).to eq(fees.first => 1, fees.last => 0)
+      end
     end
   end
 
@@ -1047,44 +1605,170 @@ RSpec.describe Invoice do
         expect(invoice.recurring_breakdown(fee)).to eq([])
       end
     end
+
+    context "with events on a prorated recurring charge" do
+      let(:organization) { create(:organization) }
+      let(:customer) { create(:customer, organization:) }
+      let(:invoice) { create(:invoice, organization:, customer:) }
+      let(:charge) { create(:standard_charge, organization:, plan: subscription.plan, billable_metric:, prorated: true) }
+
+      let(:subscription) do
+        create(
+          :subscription,
+          organization:,
+          customer:,
+          subscription_at: Time.zone.parse("2022-12-01 00:00:00"),
+          started_at: Time.zone.parse("2022-12-01 00:00:00"),
+          billing_time: :anniversary
+        )
+      end
+
+      let(:fee) do
+        create(
+          :charge_fee,
+          organization:,
+          invoice:,
+          subscription:,
+          charge:,
+          properties: {
+            "charges_from_datetime" => "2023-05-01T00:00:00Z",
+            "charges_to_datetime" => "2023-05-31T23:59:59Z",
+            "charges_duration" => 31
+          }
+        )
+      end
+
+      context "when the billable metric is a sum_agg" do
+        let(:billable_metric) do
+          create(:sum_billable_metric, organization:, field_name: "total_count", recurring: true)
+        end
+
+        before do
+          create(
+            :event,
+            organization:,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: Time.zone.parse("2023-04-10 00:00:00"),
+            properties: {"total_count" => 12}
+          )
+          create(
+            :event,
+            organization:,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: Time.zone.parse("2023-05-11 00:00:00"),
+            properties: {"total_count" => 5}
+          )
+        end
+
+        it "returns the persisted units and the units added during the period" do
+          breakdown = invoice.recurring_breakdown(fee)
+
+          expect(breakdown.map { |item| [item.date.to_s, item.action, item.amount.to_i, item.duration, item.total_duration] })
+            .to eq(
+              [
+                ["2023-05-01", "add", 12, 31, 31],
+                ["2023-05-11", "add", 5, 21, 31]
+              ]
+            )
+        end
+      end
+
+      context "when the billable metric is a unique_count_agg" do
+        let(:billable_metric) do
+          create(:unique_count_billable_metric, organization:, field_name: "unique_id", recurring: true)
+        end
+
+        before do
+          create(
+            :event,
+            organization:,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: Time.zone.parse("2023-04-10 00:00:00"),
+            properties: {"unique_id" => "111"}
+          )
+          create(
+            :event,
+            organization:,
+            subscription:,
+            code: billable_metric.code,
+            timestamp: Time.zone.parse("2023-05-11 00:00:00"),
+            properties: {"unique_id" => "222"}
+          )
+        end
+
+        it "returns the persisted item and the item added during the period" do
+          breakdown = invoice.recurring_breakdown(fee)
+
+          expect(breakdown.map { |item| [item.date.to_s, item.action, item.amount, item.duration, item.total_duration] })
+            .to eq(
+              [
+                ["2023-05-01", "add", 1, 31, 31],
+                ["2023-05-11", "add", 1, 21, 31]
+              ]
+            )
+        end
+      end
+
+      context "when the aggregation type is not supported" do
+        let(:billable_metric) { create(:weighted_sum_billable_metric, organization:, recurring: true) }
+        let(:charge) { create(:standard_charge, organization:, plan: subscription.plan, billable_metric:) }
+
+        it "raises a NotImplementedError" do
+          expect { invoice.recurring_breakdown(fee) }.to raise_error(NotImplementedError)
+        end
+      end
+    end
   end
 
   describe "#document_invoice_name" do
     let(:organization) { create(:organization, name: "LAGO", country: "FR") }
+    let(:billing_entity) { create(:billing_entity, organization:, country: "FR") }
     let(:customer) { create(:customer, organization:) }
-    let(:invoice) { create(:invoice, customer:, organization:) }
+    let(:invoice) { create(:invoice, customer:, organization:, billing_entity:) }
 
     it "returns the correct name for EU country" do
       expect(invoice.document_invoice_name).to eq("Invoice")
     end
 
     context "when invoice is self billed" do
-      let(:invoice) { create(:invoice, :self_billed, customer:, organization:) }
+      let(:invoice) { create(:invoice, :self_billed, customer:, organization:, billing_entity:) }
 
       it "returns the correct name for EU country" do
         expect(invoice.document_invoice_name).to eq("Self-billing invoice")
       end
     end
 
-    context "when organization country is Australia" do
-      let(:organization) { create(:organization, name: "LAGO", country: "AU") }
+    context "when billing entity country is Australia" do
+      let(:billing_entity) { create(:billing_entity, organization:, country: "AU") }
 
       it "returns the correct name that includes keyword tax" do
         expect(invoice.document_invoice_name).to eq("Tax invoice")
       end
     end
 
-    context "when the organization country is in TAX_INVOICE_LABEL_COUNTRIES" do
+    context "when the billing entity country is in TAX_INVOICE_LABEL_COUNTRIES" do
       let(:country) { Invoice::TAX_INVOICE_LABEL_COUNTRIES.sample }
-      let(:organization) { create(:organization, name: "LAGO", country:) }
+      let(:billing_entity) { create(:billing_entity, organization:, country:) }
 
       it "returns the correct tax invoice name" do
         expect(invoice.document_invoice_name).to eq(I18n.t("invoice.document_tax_name"))
       end
     end
 
+    context "when the billing entity country differs from the organization country" do
+      let(:organization) { create(:organization, name: "LAGO", country: "FR") }
+      let(:billing_entity) { create(:billing_entity, organization:, country: "SG") }
+
+      it "uses the billing entity country to determine the tax invoice name" do
+        expect(invoice.document_invoice_name).to eq("Tax invoice")
+      end
+    end
+
     context "when it is credit invoice" do
-      let(:invoice) { create(:invoice, customer:, organization:, invoice_type: :credit) }
+      let(:invoice) { create(:invoice, customer:, organization:, billing_entity:, invoice_type: :credit) }
 
       it "returns the correct name for EU country" do
         expect(invoice.document_invoice_name).to eq("Advance invoice")
@@ -1721,6 +2405,78 @@ RSpec.describe Invoice do
     end
   end
 
+  describe "#refundable_payment" do
+    subject(:refundable_payment) { invoice.refundable_payment }
+
+    let(:invoice) { create(:invoice, organization:) }
+
+    context "without payments" do
+      it { is_expected.to be_nil }
+    end
+
+    context "with succeeded invoice payments" do
+      let(:older_payment) { create(:payment, payable: invoice, payable_payment_status: "succeeded", created_at: 2.days.ago) }
+      let(:latest_payment) { create(:payment, payable: invoice, payable_payment_status: "succeeded", created_at: 1.day.ago) }
+
+      before do
+        older_payment
+        latest_payment
+      end
+
+      it { is_expected.to eq(latest_payment) }
+    end
+
+    context "with only a failed invoice payment" do
+      before { create(:payment, payable: invoice, payable_payment_status: "failed") }
+
+      it { is_expected.to be_nil }
+    end
+
+    context "with a payment request covering the invoice" do
+      let(:payment_request) { create(:payment_request, :succeeded, customer: invoice.customer, invoices: [invoice]) }
+      let(:request_payment) { create(:payment, payable: payment_request, payable_payment_status: "succeeded") }
+
+      before { request_payment }
+
+      it { is_expected.to eq(request_payment) }
+
+      context "when the invoice also has a succeeded payment" do
+        let(:invoice_payment) { create(:payment, payable: invoice, payable_payment_status: "succeeded") }
+
+        before { invoice_payment }
+
+        it { is_expected.to eq(invoice_payment) }
+      end
+
+      context "when the invoice also has a failed payment" do
+        before { create(:payment, payable: invoice, payable_payment_status: "failed") }
+
+        it { is_expected.to eq(request_payment) }
+      end
+
+      context "when the payment request is not succeeded" do
+        let(:payment_request) { create(:payment_request, :failed, customer: invoice.customer, invoices: [invoice]) }
+
+        it { is_expected.to be_nil }
+      end
+
+      context "when the payment request payment is not succeeded" do
+        let(:request_payment) { create(:payment, payable: payment_request, payable_payment_status: "failed") }
+
+        it { is_expected.to be_nil }
+      end
+    end
+
+    context "with a succeeded payment request for another invoice" do
+      let(:other_invoice) { create(:invoice, organization:, customer: invoice.customer) }
+      let(:payment_request) { create(:payment_request, :succeeded, customer: invoice.customer, invoices: [other_invoice]) }
+
+      before { create(:payment, payable: payment_request, payable_payment_status: "succeeded") }
+
+      it { is_expected.to be_nil }
+    end
+  end
+
   describe "#available_to_credit_amount_cents" do
     context "with created fee" do
       before do
@@ -1728,8 +2484,8 @@ RSpec.describe Invoice do
         subscription = invoice_subscription.subscription
         billable_metric = create(:unique_count_billable_metric, organization: subscription.organization)
         charge = create(:standard_charge, plan: subscription.plan, billable_metric:)
-        create(:charge_fee, subscription:, invoice:, charge:, amount_cents: 133, taxes_rate: 20)
-        invoice.update(fees_amount_cents: 160)
+        create(:charge_fee, subscription:, invoice:, charge:, amount_cents: 133, taxes_rate: 20, taxes_amount_cents: 27, taxes_precise_amount_cents: 26.6)
+        invoice.update(fees_amount_cents: 133, taxes_amount_cents: 27, sub_total_including_taxes_amount_cents: 160)
       end
 
       context "when invoice v1" do
@@ -1785,6 +2541,7 @@ RSpec.describe Invoice do
           coupons_amount_cents: 20,
           progressive_billing_credit_amount_cents:,
           taxes_amount_cents: 36,
+          sub_total_including_taxes_amount_cents: 216 - progressive_billing_credit_amount_cents,
           total_amount_cents: 216,
           taxes_rate: 20,
           version_number: 3
@@ -1800,7 +2557,17 @@ RSpec.describe Invoice do
         create(:standard_charge, plan: subscription.plan, billable_metric:)
       end
       let(:fee) do
-        create(:charge_fee, subscription:, invoice:, charge:, amount_cents: 200, taxes_rate: 20)
+        create(
+          :charge_fee,
+          subscription:,
+          invoice:,
+          charge:,
+          amount_cents: 200,
+          precise_coupons_amount_cents: 20 + progressive_billing_credit_amount_cents,
+          taxes_rate: 20,
+          taxes_amount_cents: 36,
+          taxes_precise_amount_cents: (180 - progressive_billing_credit_amount_cents) * 0.2
+        )
       end
 
       let(:progressive_billing_credit_amount_cents) { 0 }
@@ -1817,6 +2584,63 @@ RSpec.describe Invoice do
         it "returns the expected creditable amount in cents" do
           expect(invoice.available_to_credit_amount_cents).to eq(214)
         end
+      end
+    end
+
+    context "with provider taxes booked by position" do
+      let(:invoice) { create(:invoice, fees_amount_cents: 16, taxes_amount_cents: 2, sub_total_including_taxes_amount_cents: 18, total_amount_cents: 18, version_number: 3) }
+
+      before do
+        [1, 1, 0, 0].each do |booked|
+          create(:fee, invoice:, amount_cents: 4, taxes_rate: booked.zero? ? 0 : 10.55, taxes_amount_cents: booked, taxes_precise_amount_cents: 0.422 * booked)
+        end
+      end
+
+      it "returns the booked invoice total" do
+        expect(invoice.available_to_credit_amount_cents).to eq(18)
+      end
+    end
+
+    context "with native fee taxes rounded once on the invoice" do
+      let(:invoice) { create(:invoice, fees_amount_cents: 15, taxes_amount_cents: 2, sub_total_including_taxes_amount_cents: 17, total_amount_cents: 17, version_number: 3) }
+
+      let(:taxes_precise_amount_cents) { 0.5 }
+
+      before do
+        create_list(:fee, 3, invoice:, amount_cents: 5, taxes_rate: 10, taxes_amount_cents: 1, taxes_precise_amount_cents:)
+      end
+
+      it "returns the invoice total rather than the sum of rounded fee taxes" do
+        expect(invoice.available_to_credit_amount_cents).to eq(17)
+      end
+
+      context "with fees billed before exact taxes were stored" do
+        let(:taxes_precise_amount_cents) { 0 }
+
+        it "splits the invoice tax by the rounded fee taxes" do
+          expect(invoice.available_to_credit_amount_cents).to eq(17)
+        end
+      end
+    end
+
+    context "with a coupon applied to one fee only" do
+      let(:invoice) do
+        create(:invoice, fees_amount_cents: 200, coupons_amount_cents: 20, taxes_amount_cents: 36, sub_total_including_taxes_amount_cents: 216, total_amount_cents: 216, version_number: 3)
+      end
+      let(:discounted_fee) do
+        create(:fee, invoice:, amount_cents: 100, precise_coupons_amount_cents: 20, taxes_rate: 20, taxes_amount_cents: 16, taxes_precise_amount_cents: 16)
+      end
+      let(:full_price_fee) do
+        create(:fee, invoice:, amount_cents: 100, taxes_rate: 20, taxes_amount_cents: 20, taxes_precise_amount_cents: 20)
+      end
+
+      before do
+        discounted_fee
+        create(:credit_note_item, credit_note: create(:credit_note, invoice:), fee: full_price_fee, amount_cents: 100, precise_amount_cents: 100)
+      end
+
+      it "returns what remains on the discounted fee" do
+        expect(invoice.available_to_credit_amount_cents).to eq(80 + 16)
       end
     end
   end
@@ -1855,6 +2679,26 @@ RSpec.describe Invoice do
     end
   end
 
+  describe "#web_url" do
+    it "returns the lago frontend url of the invoice overview page" do
+      expect(invoice.web_url).to eq(
+        URI.join(
+          Rails.application.config.lago_front_url,
+          "/#{invoice.organization.slug}/customer/#{invoice.customer_id}/",
+          "invoice/#{invoice.id}/overview"
+        ).to_s
+      )
+    end
+
+    context "when the invoice is not visible" do
+      let(:invoice) { create(:invoice, status: :closed) }
+
+      it "returns nil" do
+        expect(invoice.web_url).to be_nil
+      end
+    end
+  end
+
   describe "#creditable_amount_cents" do
     let(:invoice) { create(:invoice, version_number:, status:, payment_status:, fees_amount_cents:, taxes_amount_cents:, coupons_amount_cents:, progressive_billing_credit_amount_cents:) }
     let(:fees_amount_cents) { 1000 }
@@ -1867,8 +2711,8 @@ RSpec.describe Invoice do
       subscription = invoice_subscription.subscription
       billable_metric = create(:unique_count_billable_metric, organization: subscription.organization)
       charge = create(:standard_charge, plan: subscription.plan, billable_metric:)
-      create(:charge_fee, subscription:, invoice:, charge:, amount_cents: 133, taxes_rate: 20)
-      invoice.update(fees_amount_cents: 160)
+      create(:charge_fee, subscription:, invoice:, charge:, amount_cents: 133, taxes_rate: 20, taxes_amount_cents: 27, taxes_precise_amount_cents: 26.6)
+      invoice.update(fees_amount_cents: 133, taxes_amount_cents: 27, sub_total_including_taxes_amount_cents: 160)
     end
 
     context "when version_number is less than CREDIT_NOTES_MIN_VERSION" do

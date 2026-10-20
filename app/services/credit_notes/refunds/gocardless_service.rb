@@ -3,6 +3,8 @@
 module CreditNotes
   module Refunds
     class GocardlessService < BaseService
+      Result = BaseResult[:credit_note, :refund]
+
       include Customers::PaymentProviderFinder
 
       PENDING_STATUSES = %w[created pending_submission submitted refund_settled].freeze
@@ -24,9 +26,11 @@ module CreditNotes
         refund = Refund.new(
           organization_id: credit_note.organization_id,
           credit_note:,
+          refundable: credit_note,
+          reason: :credit_note,
           payment:,
           payment_provider: payment.payment_provider,
-          payment_provider_customer: payment_provider_customer(customer),
+          payment_provider_customer: payment_provider_customer(payment),
           amount_cents: gocardless_result.amount,
           amount_currency: gocardless_result.currency&.upcase,
           status: gocardless_result.status,
@@ -44,7 +48,7 @@ module CreditNotes
       rescue GoCardlessPro::Error, GoCardlessPro::ValidationError => e
         deliver_error_webhook(message: e.message, code: e.code)
         update_credit_note_status(:failed)
-        Utils::ActivityLog.produce(credit_note, "credit_note.refund_failure")
+        Utils::ActivityLog.produce(credit_note, "credit_note.provider_refund_failure")
 
         if e.is_a?(GoCardlessPro::ValidationError)
           result
@@ -67,7 +71,7 @@ module CreditNotes
 
         if FAILED_STATUSES.include?(status.to_s)
           deliver_error_webhook(message: "Payment refund failed", code: nil)
-          Utils::ActivityLog.produce(credit_note, "credit_note.refund_failure")
+          Utils::ActivityLog.produce(credit_note, "credit_note.provider_refund_failure")
           result.service_failure!(code: "refund_failed", message: "Refund failed to perform")
         end
 
@@ -89,7 +93,7 @@ module CreditNotes
       end
 
       def payment
-        @payment ||= credit_note.invoice.payments.order(created_at: :desc).first
+        @payment ||= invoice.refundable_payment
       end
 
       def client
@@ -126,9 +130,9 @@ module CreditNotes
 
       def deliver_error_webhook(message:, code:)
         SendWebhookJob.perform_later(
-          "credit_note.provider_refund_failure",
+          "credit_note.refund_failure",
           credit_note,
-          provider_customer_id: payment_provider_customer(customer)&.provider_customer_id,
+          provider_customer_id: payment_provider_customer(payment)&.provider_customer_id,
           provider_error: {
             message:,
             error_code: code

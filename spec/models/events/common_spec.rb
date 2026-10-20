@@ -11,23 +11,24 @@ RSpec.describe Events::Common do
       external_subscription_id: subscription.external_id,
       timestamp:,
       code: billable_metric.code,
-      properties: {}
+      properties: {},
+      created_at:
     )
   end
 
-  let(:organization) { create(:organization) }
-  let(:billable_metric) { create(:billable_metric, organization: organization) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:billable_metric) { create_default(:billable_metric, organization: organization) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
+  let_it_be(:plan) { create_default(:plan, organization:) }
+
   let(:timestamp) { Time.current - 1.second }
-
-  let(:customer) { create(:customer, organization:) }
-  let(:plan) { create(:plan, organization:) }
+  let(:created_at) { nil }
   let(:subscription) { create(:subscription, organization:, customer:, plan:, started_at:) }
-
   let(:started_at) { Time.current - 3.days }
   let(:external_subscription_id) { subscription.external_id }
 
   describe "#persisted?" do
-    it { expect(event.persisted).to be_truthy }
+    it { expect(event.persisted?).to be(true) }
 
     context "when persisted value is passed to the event" do
       subject(:event) do
@@ -45,7 +46,14 @@ RSpec.describe Events::Common do
 
       it "sets the value to the instance" do
         expect(event.persisted).to be_falsey
+        expect(event.persisted?).to be(false)
       end
+    end
+  end
+
+  describe "#created_at" do
+    it "defaults to nil" do
+      expect(event.created_at).to be_nil
     end
   end
 
@@ -150,8 +158,43 @@ RSpec.describe Events::Common do
         "external_subscription_id" => subscription.external_id,
         "code" => billable_metric.code,
         "properties" => {},
-        "timestamp" => timestamp.to_f
+        "timestamp" => timestamp.to_f,
+        "timestamp_with_precision" => timestamp.iso8601(9),
+        "created_at" => nil
       )
+    end
+
+    context "when created_at is set" do
+      let(:created_at) { Time.zone.parse("2026-05-22 10:04:50.227587123 +0000") }
+
+      it "serializes created_at with nanosecond precision" do
+        expect(event.as_json["created_at"]).to eq(created_at.iso8601(9))
+      end
+    end
+  end
+
+  describe ".timestamp_from_source" do
+    let(:timestamp) { Time.zone.parse("2026-05-22 10:04:50.227587000 +0000") }
+    let(:source) { event.as_json }
+
+    it "preserves timestamp precision from the serialized event" do
+      expect(described_class.timestamp_from_source(source)).to eq(timestamp)
+    end
+
+    context "when the precise timestamp is not present" do
+      before { source.delete("timestamp_with_precision") }
+
+      it "falls back to the float timestamp" do
+        expect(described_class.timestamp_from_source(source)).to eq(Time.zone.at(source["timestamp"].to_f))
+      end
+    end
+
+    context "when the precise timestamp cannot be parsed" do
+      before { source["timestamp_with_precision"] = "invalid" }
+
+      it "falls back to the float timestamp" do
+        expect(described_class.timestamp_from_source(source)).to eq(Time.zone.at(source["timestamp"].to_f))
+      end
     end
   end
 end

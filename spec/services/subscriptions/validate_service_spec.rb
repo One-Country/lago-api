@@ -5,14 +5,9 @@ require "rails_helper"
 RSpec.describe Subscriptions::ValidateService do
   subject(:validate_service) { described_class.new(result, **args) }
 
-  let(:result) { BaseService::Result.new }
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:customer) { create(:customer, organization:) }
-  let(:plan) { create(:plan, organization:) }
+  let(:result) { Subscriptions::CreateService::Result.new }
   let(:subscription_at) { Time.current.iso8601 }
   let(:ending_at) { (Time.current + 1.year).iso8601 }
-
   let(:args) do
     {
       customer:,
@@ -22,14 +17,22 @@ RSpec.describe Subscriptions::ValidateService do
       on_termination_credit_note:,
       on_termination_invoice:,
       subscription:,
-      subscription_type:
+      subscription_type:,
+      consolidate_invoice:,
+      consolidate_invoice_provided:
     }
   end
-
   let(:on_termination_credit_note) { nil }
   let(:on_termination_invoice) { nil }
   let(:subscription) { nil }
   let(:subscription_type) { "create" }
+  let(:consolidate_invoice) { nil }
+  let(:consolidate_invoice_provided) { false }
+
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:membership) { create(:membership) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
+  let_it_be(:plan) { create(:plan, organization:) }
 
   describe "#ending_at" do
     subject(:method_call) { validate_service.__send__(:ending_at) }
@@ -116,6 +119,24 @@ RSpec.describe Subscriptions::ValidateService do
           expect(result.error.messages[:subscription_at]).to eq(["invalid_date"])
         end
       end
+
+      context "when subscription_at raises a bare ArgumentError while parsing" do
+        let(:subscription_at) { "1" * 129 }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:subscription_at]).to eq(["invalid_date"])
+        end
+      end
+
+      context "when subscription_at is in ISO8601 week-date format" do
+        let(:subscription_at) { "2022-W50-2" }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:subscription_at]).to eq(["invalid_date"])
+        end
+      end
     end
 
     context "with invalid ending_at" do
@@ -137,6 +158,24 @@ RSpec.describe Subscriptions::ValidateService do
         end
       end
 
+      context "when ending_at raises a bare ArgumentError while parsing" do
+        let(:ending_at) { "1" * 129 }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:ending_at]).to eq(["invalid_date"])
+        end
+      end
+
+      context "when ending_at is in ISO8601 week-date format" do
+        let(:ending_at) { "2099-W50-2" }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:ending_at]).to eq(["invalid_date"])
+        end
+      end
+
       context "when ending_at uses an invalid date format" do
         let(:ending_at) { "2025-08-20T16:11:39.061+02:00" }
 
@@ -148,6 +187,26 @@ RSpec.describe Subscriptions::ValidateService do
 
       context "when ending_at is less than subscription_at and current time" do
         let(:ending_at) { (Time.current - 1.year).iso8601 }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:ending_at]).to eq(["invalid_date"])
+        end
+      end
+
+      context "when ending_at is in the future but not after subscription_at" do
+        let(:subscription_at) { (Time.current + 2.years).iso8601 }
+        let(:ending_at) { (Time.current + 1.year).iso8601 }
+
+        it "returns false and result has errors" do
+          expect(validate_service).not_to be_valid
+          expect(result.error.messages[:ending_at]).to eq(["invalid_date"])
+        end
+      end
+
+      context "when ending_at is valid but subscription_at uses an invalid format" do
+        let(:subscription_at) { "2022-W50-2" }
+        let(:ending_at) { (Time.current + 1.year).iso8601 }
 
         it "returns false and result has errors" do
           expect(validate_service).not_to be_valid
@@ -192,6 +251,25 @@ RSpec.describe Subscriptions::ValidateService do
 
     context "with valid on_termination_invoice skip" do
       let(:on_termination_invoice) { "skip" }
+
+      it "returns true" do
+        expect(validate_service).to be_valid
+      end
+    end
+
+    context "with invalid consolidate_invoice" do
+      let(:consolidate_invoice) { "null" }
+      let(:consolidate_invoice_provided) { true }
+
+      it "returns false and result has errors" do
+        expect(validate_service).not_to be_valid
+        expect(result.error.messages[:consolidate_invoice]).to eq(["invalid_value"])
+      end
+    end
+
+    context "with valid consolidate_invoice" do
+      let(:consolidate_invoice) { "false" }
+      let(:consolidate_invoice_provided) { true }
 
       it "returns true" do
         expect(validate_service).to be_valid
@@ -286,7 +364,7 @@ RSpec.describe Subscriptions::ValidateService do
         }
       end
 
-      let(:customer) { create(:customer, organization:, payment_provider: "stripe") }
+      let_it_be(:customer) { create(:customer, organization:, payment_provider: "stripe") }
 
       context "when activation_rules contains valid payment rule" do
         let(:activation_rules) { [{type: "payment", timeout_hours: 48}] }

@@ -5,15 +5,15 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Gocardless::Payments::CreateService do
   subject(:create_service) { described_class.new(payment:, reference:, metadata:) }
 
-  let(:customer) { create(:customer, payment_provider_code: code) }
-  let(:organization) { customer.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:code) { "gocardless_1" }
+  let_it_be(:customer) { create(:customer, payment_provider_code: code) }
   let(:gocardless_payment_provider) { create(:gocardless_provider, organization:, code:) }
   let(:gocardless_customer) { create(:gocardless_customer, customer:, payment_provider: gocardless_payment_provider) }
   let(:gocardless_client) { instance_double(GoCardlessPro::Client) }
   let(:gocardless_payments_service) { instance_double(GoCardlessPro::Services::PaymentsService) }
   let(:gocardless_mandates_service) { instance_double(GoCardlessPro::Services::MandatesService) }
   let(:gocardless_list_response) { instance_double(GoCardlessPro::ListResponse) }
-  let(:code) { "gocardless_1" }
   let(:reference) { "organization.name - Invoice #{invoice.number}" }
   let(:metadata) do
     {
@@ -68,7 +68,6 @@ RSpec.describe PaymentProviders::Gocardless::Payments::CreateService do
           "currency" => invoice.currency,
           "status" => "paid_out"
         ))
-      allow(Invoices::PrepaidCreditJob).to receive(:perform_later)
     end
 
     it "creates a gocardless payment" do
@@ -148,12 +147,11 @@ RSpec.describe PaymentProviders::Gocardless::Payments::CreateService do
       end
     end
 
-    context "when multiple payment methods are enabled" do
+    context "when payment has a payment method" do
       let(:default_payment_method) { create(:payment_method, customer:, provider_method_id: "mandate_id2") }
 
       before do
         payment.update!(payment_method: default_payment_method)
-        organization.update!(feature_flags: ["multiple_payment_methods"])
         gocardless_customer.update!(provider_mandate_id: "mandate_id2")
       end
 

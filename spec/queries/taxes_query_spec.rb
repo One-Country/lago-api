@@ -14,7 +14,7 @@ RSpec.describe TaxesQuery do
   let(:filters) { nil }
   let(:order) { nil }
   let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
+  let(:organization) { create_default(:organization) }
   let(:tax_first) { create(:tax, :applied_to_billing_entity, organization:, name: "defgh", code: "11", rate: 10) }
   let(:tax_second) { create(:tax, :applied_to_billing_entity, organization:, name: "abcde", code: "22", rate: 5) }
 
@@ -99,6 +99,21 @@ RSpec.describe TaxesQuery do
 
     it "returns only one bot applied tax" do
       expect(result.taxes).to eq([tax_third])
+    end
+  end
+
+  context "when applied taxes exceed the page size and filtering on not applied to BE" do
+    let(:filters) { {applied_to_organization: false} }
+    let(:pagination) { {page: 1, limit: 2} }
+
+    before do
+      3.times do |i|
+        create(:tax, :applied_to_billing_entity, organization:, code: "extra-#{i}", name: "extra-#{i}")
+      end
+    end
+
+    it "excludes every applied tax regardless of the page limit" do
+      expect(returned_ids).to eq([tax_third.id])
     end
   end
 

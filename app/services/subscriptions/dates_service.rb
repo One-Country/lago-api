@@ -101,6 +101,9 @@ module Subscriptions
       # NOTE: If customer applicable timezone changes during a billing period, there is a risk to double count events
       #       or to miss some. To prevent it, we have to ensure that invoice bounds does not overlap or that there is no
       #       hole between a charges_from_datetime and the charges_to_datetime of the previous period
+      # TODO: the previous boundary is an end of day (`23:59:59.999999`), so adding a second opens
+      #       the period at `00:00:00.999999` and leaves the one-second hole this is meant to
+      #       close. Same in `fixed_charges_from_datetime`.
       if timezone_has_changed? && previous_charge_to_datetime
         new_datetime = previous_charge_to_datetime + 1.second
 
@@ -148,8 +151,18 @@ module Subscriptions
     end
 
     def fixed_charges_to_datetime
-      return unless subscription.started_at
       return unless should_fill_fixed_charges_boundaries?
+
+      fixed_charges_period_to_datetime
+    end
+
+    # End of the current fixed-charges period, regardless of whether fixed charges are billed
+    # this cycle. `fixed_charges_to_datetime` gates this behind `should_fill_fixed_charges_boundaries?`
+    # to compute invoice boundaries; callers scheduling a deferred change rather than invoicing need
+    # the boundary even on cycles that skip fixed-charge billing (e.g. yearly/semiannual plans billing
+    # charges monthly but fixed charges per period).
+    def fixed_charges_period_to_datetime
+      return unless subscription.started_at
 
       datetime = customer_timezone_shift(compute_fixed_charges_to_date, end_of_day: true)
       datetime = subscription.terminated_at if subscription.terminated? && subscription.terminated_at <= datetime
@@ -166,6 +179,13 @@ module Subscriptions
     def end_of_period
       end_utc = compute_to_date
       customer_timezone_shift(end_utc, end_of_day: true)
+    end
+
+    # Start of the billing period that follows the current one, at the beginning of the day in the
+    # customer timezone. `end_of_period` lands at the end of the day, so the next period starts the
+    # following day at 00:00.
+    def next_period_started_at
+      (end_of_period + 1.day).in_time_zone(customer.applicable_timezone).beginning_of_day
     end
 
     # NOTE: Retrieve the beginning of the previous period based on the billing date
@@ -283,6 +303,12 @@ module Subscriptions
 
     def last_day_of_month?(date)
       date.day == date.end_of_month.day
+    end
+
+    # NOTE: the anniversary day of a month that is shorter than the subscription day, clamped to that
+    #       month. Resolved from the subscription, so a short month never drags the following periods.
+    def anniversary_day_in(year, month)
+      [subscription_at.day, Time.days_in_month(month, year)].min
     end
 
     def compute_base_date

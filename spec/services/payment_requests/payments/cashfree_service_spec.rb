@@ -3,10 +3,8 @@
 require "rails_helper"
 
 RSpec.describe PaymentRequests::Payments::CashfreeService do
-  subject(:cashfree_service) { described_class.new(payment_request) }
-
+  let_it_be(:organization) { create_default(:organization) }
   let(:customer) { create(:customer, payment_provider_code: code) }
-  let(:organization) { customer.organization }
   let(:cashfree_payment_provider) { create(:cashfree_provider, organization:, code:) }
   let(:cashfree_customer) { create(:cashfree_customer, customer:) }
   let(:cashfree_client) { instance_double(LagoHttpClient::Client) }
@@ -46,7 +44,7 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
     )
   end
 
-  describe "#update_payment_status" do
+  describe ".call(:update_payment_status)" do
     let(:payment) do
       create(
         :payment,
@@ -66,7 +64,8 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
     end
 
     let(:result) do
-      cashfree_service.update_payment_status(
+      described_class.call(
+        :update_payment_status,
         organization_id: organization.id,
         status: cashfree_payment.status,
         cashfree_payment:
@@ -74,8 +73,6 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
     end
 
     before do
-      allow(SendWebhookJob).to receive(:perform_later)
-      allow(SegmentTrackJob).to receive(:perform_later)
       payment
     end
 
@@ -158,7 +155,8 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
       end
 
       it "updates the payment, payment_request and invoices status" do
-        result = cashfree_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
           organization_id: organization.id,
           status: cashfree_payment.status,
           cashfree_payment:
@@ -215,6 +213,32 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
 
       it "does not send payment requested email" do
         expect { result }.not_to have_enqueued_mail(PaymentRequestMailer, :requested)
+      end
+    end
+
+    context "when a failed webhook arrives after the invoices were already paid through another path" do
+      let(:cashfree_payment) do
+        PaymentProviders::CashfreeProvider::CashfreePayment.new(
+          id: payment_request.id,
+          status: "EXPIRED",
+          metadata: {}
+        )
+      end
+
+      before do
+        payment_request.payment_failed!
+        invoice_1.payment_succeeded!
+        invoice_2.payment_succeeded!
+      end
+
+      it "leaves already-succeeded invoices untouched" do
+        expect { result }
+          .to not_change { invoice_1.reload.payment_status }
+          .and not_change { invoice_2.reload.payment_status }
+
+        expect(result).to be_success
+        expect(invoice_1.reload).to be_payment_succeeded
+        expect(invoice_2.reload).to be_payment_succeeded
       end
     end
 
@@ -287,7 +311,7 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
     end
   end
 
-  describe ".generate_payment_url" do
+  describe ".call(:generate_payment_url)" do
     let(:payment_links_response) { Net::HTTPResponse.new("1.0", "200", "OK") }
 
     before do
@@ -303,7 +327,7 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
     end
 
     it "generates payment url" do
-      result = cashfree_service.generate_payment_url
+      result = described_class.call(:generate_payment_url, payment_request)
 
       expect(result.payment_url).to be_present
     end
@@ -326,7 +350,7 @@ RSpec.describe PaymentRequests::Payments::CashfreeService do
       end
 
       it "returns a third party error" do
-        result = cashfree_service.generate_payment_url
+        result = described_class.call(:generate_payment_url, payment_request)
 
         expect(result).not_to be_success
         expect(result.error).to be_a(BaseService::ThirdPartyFailure)

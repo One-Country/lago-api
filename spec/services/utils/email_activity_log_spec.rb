@@ -4,9 +4,6 @@ require "rails_helper"
 
 RSpec.describe Utils::EmailActivityLog, :capture_kafka_messages do
   let(:invoice) { create(:invoice) }
-  let(:organization) { invoice.organization }
-  let(:customer) { invoice.customer }
-
   let(:message) do
     instance_double(
       Mail::Message,
@@ -19,6 +16,9 @@ RSpec.describe Utils::EmailActivityLog, :capture_kafka_messages do
       body: instance_double(Mail::Body, decoded: "")
     )
   end
+
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
 
   before do
     stub_const("#{described_class}::AVAILABLE", true)
@@ -103,14 +103,37 @@ RSpec.describe Utils::EmailActivityLog, :capture_kafka_messages do
       expect(kafka_messages).to be_empty
     end
 
-    it "logs error and returns nil when kafka raises" do
-      allow(karafka_producer).to receive(:produce_async).and_raise(StandardError, "Kafka down")
-      allow(Rails.logger).to receive(:error)
+    [
+      {exception: WaterDrop::Errors::ProduceError, message: "#<Rdkafka::RdkafkaError: Local: Unknown topic (unknown_topic)>", level: :error},
+      {exception: WaterDrop::Errors::MessageInvalidError, message: "Message is too large", level: :warning}
+    ].each do |error_context|
+      exception = error_context[:exception]
+      exception_message = error_context[:message]
+      level = error_context[:level]
+      context "when producer raises #{exception}" do
+        subject(:produce) { described_class.produce(document: invoice, message:) }
 
-      result = described_class.produce(document: invoice, message:)
+        let(:result) { BaseService::Result.new }
 
-      expect(result).to be_nil
-      expect(Rails.logger).to have_received(:error).with("Failed to produce email activity log: Kafka down")
+        before do
+          allow(karafka_producer).to receive(:produce_async).and_raise(exception.new(exception_message))
+        end
+
+        context "when sentry is configured", :sentry do
+          it "captures the exception with the #{level} level and returns false" do
+            expect(produce).to eq false
+            expect(sentry_events).to include_sentry_event(exception: exception, message: exception_message)
+            expect(sentry_events.last.level).to eq(level)
+          end
+        end
+
+        context "when sentry is not configured" do
+          it "re-raises the error" do
+            expect { produce }.to raise_error(exception, exception_message)
+            expect(sentry_events).to be_empty
+          end
+        end
+      end
     end
 
     context "with credit_note document" do

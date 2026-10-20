@@ -3,8 +3,7 @@
 require "rails_helper"
 
 RSpec.describe WalletTransactions::CreateFromParamsService do
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:, currency:) }
+  let_it_be(:organization) { create_default(:organization) }
   let(:currency) { "EUR" }
   let(:subscription) { create(:subscription, customer:) }
   let(:wallet) do
@@ -22,6 +21,11 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
   end
   let(:wallet_invoice_requires_successful_payment) { false }
   let(:rate_amount) { 1 }
+  let(:customer) { create_default(:customer, organization:, currency:) }
+
+  before_all do
+    create_default(:plan)
+  end
 
   before do
     subscription
@@ -73,11 +77,13 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
       expect(wallet.reload.credits_balance).to eq(22.0)
     end
 
-    it "updates wallet ongoing balance based on granted and voided credits" do
-      subject
+    it "flags the customer wallets for refresh" do
+      expect { subject }.to change { customer.reload.awaiting_wallet_refresh }.from(false).to(true)
+    end
 
-      expect(wallet.reload.ongoing_balance_cents).to eq(2200)
-      expect(wallet.reload.credits_ongoing_balance).to eq(22.0)
+    it "enqueues a RefreshWalletJob to update the ongoing balance" do
+      expect { subject }
+        .to have_enqueued_job_after_commit(Customers::RefreshWalletJob).with(customer)
     end
 
     it "enqueues a SendWebhookJob for each wallet transaction" do
@@ -107,6 +113,21 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
 
         expect(wallet.credits_balance).to eq(15.71556)
         expect(wallet.balance.to_d).to eq(15.72)
+      end
+    end
+
+    context "when voiding credits on a traceable wallet without trackable inbound balance" do
+      let(:params) { {wallet_id: wallet.id, voided_credits: "3.00"} }
+
+      it "returns a failed result with the underlying validation error" do
+        expect(result).to be_failure
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq(amount_cents: ["exceeds_available_amount"])
+        expect(result.wallet_transactions).to be_nil
+      end
+
+      it "does not create any wallet transaction" do
+        expect { result }.not_to change(WalletTransaction, :count)
       end
     end
 
@@ -160,6 +181,22 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
 
       it "creates wallet transactions with specified source" do
         expect(result.wallet_transactions).to all(have_attributes(source: "interval"))
+      end
+    end
+
+    context "with purchase_order_number parameter" do
+      let(:params) do
+        {
+          wallet_id: wallet.id,
+          paid_credits:,
+          granted_credits:,
+          purchase_order_number: "PO-123"
+        }
+      end
+
+      it "creates paid and granted wallet transactions with the purchase order number" do
+        expect(result).to be_success
+        expect(result.wallet_transactions).to all(have_attributes(purchase_order_number: "PO-123"))
       end
     end
 
@@ -291,6 +328,33 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
         expect(result.error.messages[:paid_credits]).to eq(["invalid_paid_credits", "invalid_amount"])
       end
 
+      context "when paid_credits is above the wallet maximum" do
+        let(:paid_credits) { "500.00" }
+
+        before { wallet.update! paid_top_up_max_amount_cents: 100_00 }
+
+        it "returns an error and creates nothing" do
+          expect { result }.not_to change(WalletTransaction, :count)
+          expect(result).not_to be_success
+          expect(result.error.messages[:paid_credits]).to eq(["amount_above_maximum"])
+        end
+
+        context "when ignore_paid_top_up_limits is true" do
+          let(:params) do
+            {
+              wallet_id: wallet.id,
+              paid_credits:,
+              ignore_paid_top_up_limits: true
+            }
+          end
+
+          it "creates wallet transaction" do
+            expect(result).to be_success
+            expect(result.wallet_transactions.first.credit_amount).to eq(500)
+          end
+        end
+      end
+
       context "when paid_credits is below the wallet minimum" do
         let(:paid_credits) { "5.00" }
 
@@ -314,6 +378,23 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
             expect(result).to be_success
             expect(result.wallet_transactions.first.credit_amount).to eq(5)
           end
+        end
+      end
+
+      context "when granted_credits round to zero monetary value" do
+        let(:rate_amount) { 0.01 }
+        let(:params) do
+          {
+            wallet_id: wallet.id,
+            granted_credits: "0.4"
+          }
+        end
+
+        it "fails and persists no wallet transaction" do
+          expect { result }.not_to change(WalletTransaction, :count)
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages[:granted_credits]).to eq(["amount_rounds_to_zero"])
         end
       end
 
@@ -395,7 +476,9 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
 
     context "with decimal value and currency without digits" do
       let(:paid_credits) { "4.39999" }
-      let(:currency) { "JPY" }
+
+      let_it_be(:currency) { "JPY" }
+      let_it_be(:customer) { create_default(:customer, organization:, currency:) }
 
       it "creates wallet transaction with rounded value" do
         expect(result.wallet_transactions.first.credit_amount).to eq(4)
@@ -417,10 +500,55 @@ RSpec.describe WalletTransactions::CreateFromParamsService do
         create(:invoice_custom_section, organization:, code: "section_code_1")
       end
 
+      after { CurrentContext.source = nil }
+
       it "creates wallet transaction with invoice_custom_section" do
         applied_sections = result.wallet_transactions.first.applied_invoice_custom_sections
         expect(applied_sections.count).to eq(1)
         expect(applied_sections.first.invoice_custom_section.code).to eq("section_code_1")
+      end
+    end
+
+    context "when invoice_custom_section_ids param exists (job context)" do
+      let(:section) { create(:invoice_custom_section, organization:) }
+      let(:params) do
+        {
+          wallet_id: wallet.id,
+          paid_credits:,
+          invoice_custom_section: {skip_invoice_custom_sections: false, invoice_custom_section_ids: [section.id]}
+        }
+      end
+
+      it "attaches the ICS to the wallet transaction by ID" do
+        applied_sections = result.wallet_transactions.first.applied_invoice_custom_sections
+        expect(applied_sections.count).to eq(1)
+        expect(applied_sections.first.invoice_custom_section).to eq(section)
+      end
+    end
+
+    context "when invoice_custom_section param has skip_invoice_custom_sections: true (job context)" do
+      let(:params) do
+        {
+          wallet_id: wallet.id,
+          paid_credits:,
+          invoice_custom_section: {skip_invoice_custom_sections: true, invoice_custom_section_ids: []}
+        }
+      end
+
+      it "marks the wallet transaction as skipping custom sections" do
+        transaction = result.wallet_transactions.first
+        expect(transaction.skip_invoice_custom_sections).to be(true)
+        expect(transaction.applied_invoice_custom_sections).to be_empty
+      end
+    end
+
+    context "when granted credits should be calculated using amount and wallet rate" do
+      let(:granted_credits) { "10.34567" }
+      let(:rate_amount) { 1.375 }
+
+      it "creates wallet transaction with expected credit amount" do
+        expect(result.wallet_transactions.find(&:granted?).credit_amount).to eq(10.34909) # 14.23/1.375
+        expect(result.wallet_transactions.find(&:granted?).amount).to eq(14.23) # 10.34567*1.375
       end
     end
   end

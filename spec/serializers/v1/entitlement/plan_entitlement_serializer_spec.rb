@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe V1::Entitlement::PlanEntitlementSerializer do
   subject { described_class.new(entitlement) }
 
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:plan) { create_default(:plan, organization:) }
   let(:feature) { create(:feature, organization:, code: "seats") }
   let(:privilege) { create(:privilege, :integer_type, feature:, organization:) }
   let(:privilege2) { create(:privilege, :boolean_type, feature:, organization:) }
@@ -43,6 +43,16 @@ RSpec.describe V1::Entitlement::PlanEntitlementSerializer do
           "select_options" => ["option1", "option2", "option3"]
         }}
       )
+    end
+
+    context "when a privilege is discarded" do
+      before { privilege.discard! }
+
+      it "does not serialize values of the discarded privilege" do
+        result = subject.serialize
+
+        expect(result[:privileges].map { |p| p[:code] }).to contain_exactly("bool", "str", "opt")
+      end
     end
   end
 end

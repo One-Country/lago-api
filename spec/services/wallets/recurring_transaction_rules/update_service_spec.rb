@@ -21,6 +21,11 @@ RSpec.describe Wallets::RecurringTransactionRules::UpdateService do
   end
   let(:transaction_metadata) { [] }
 
+  before_all do
+    create_default(:organization)
+    create_default(:customer)
+  end
+
   describe "#call" do
     subject(:result) { described_class.call(wallet:, params:) }
 
@@ -40,6 +45,48 @@ RSpec.describe Wallets::RecurringTransactionRules::UpdateService do
         threshold_credits: 0.0,
         trigger: "interval"
       )
+    end
+
+    context "when purchase_order_number is present" do
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            trigger: "interval",
+            interval: "weekly",
+            paid_credits: "105",
+            granted_credits: "105",
+            purchase_order_number: "PO-RULE-123"
+          }
+        ]
+      end
+
+      it "updates the existing rule purchase order number" do
+        rule = result.wallet.reload.recurring_transaction_rules.active.sole
+
+        expect(rule.id).to eq(recurring_transaction_rule.id)
+        expect(rule.purchase_order_number).to eq("PO-RULE-123")
+      end
+    end
+
+    context "when purchase_order_number is too long" do
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            trigger: "interval",
+            interval: "weekly",
+            paid_credits: "105",
+            granted_credits: "105",
+            purchase_order_number: "a" * 256
+          }
+        ]
+      end
+
+      it "returns a validation error" do
+        expect(result).to be_failure
+        expect(result.error.messages[:purchase_order_number]).to eq(["value_is_too_long"])
+      end
     end
 
     context "when updating an inactive rule" do
@@ -110,6 +157,29 @@ RSpec.describe Wallets::RecurringTransactionRules::UpdateService do
         )
         expect(rule.id).not_to eq(recurring_transaction_rule.id)
       end
+
+      context "when purchase_order_number is present" do
+        let(:params) do
+          [
+            {
+              granted_credits: "105",
+              interval: "weekly",
+              method: "target",
+              paid_credits: "105",
+              target_ongoing_balance: "300",
+              trigger: "interval",
+              purchase_order_number: "PO-REPLACEMENT-123"
+            }
+          ]
+        end
+
+        it "creates the replacement rule with the purchase order number" do
+          rule = result.wallet.reload.recurring_transaction_rules.active.sole
+
+          expect(rule.id).not_to eq(recurring_transaction_rule.id)
+          expect(rule.purchase_order_number).to eq("PO-REPLACEMENT-123")
+        end
+      end
     end
 
     context "when paid_credits and granted_credits are explicitly null" do
@@ -144,6 +214,131 @@ RSpec.describe Wallets::RecurringTransactionRules::UpdateService do
           granted_credits: 0.0,
           threshold_credits: 0.0
         )
+      end
+    end
+
+    context "when updating grants_target_top_up" do
+      let(:recurring_transaction_rule) do
+        create(:recurring_transaction_rule, wallet:, method: :target, target_ongoing_balance: 300, grants_target_top_up: false)
+      end
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            method: "target",
+            trigger: "interval",
+            interval: "weekly",
+            target_ongoing_balance: "300",
+            grants_target_top_up: true
+          }
+        ]
+      end
+
+      it "updates the rule to grant credits" do
+        rule = result.wallet.reload.recurring_transaction_rules.active.first
+
+        expect(rule).to have_attributes(
+          id: recurring_transaction_rule.id,
+          method: "target",
+          grants_target_top_up: true
+        )
+      end
+
+      context "when flipping grants_target_top_up from true to false" do
+        let(:recurring_transaction_rule) do
+          create(:recurring_transaction_rule, wallet:, method: :target, target_ongoing_balance: 300, grants_target_top_up: true)
+        end
+        let(:params) do
+          [
+            {
+              lago_id: recurring_transaction_rule.id,
+              method: "target",
+              trigger: "interval",
+              interval: "weekly",
+              target_ongoing_balance: "300",
+              grants_target_top_up: false
+            }
+          ]
+        end
+
+        it "updates the rule to stop granting credits" do
+          rule = result.wallet.reload.recurring_transaction_rules.active.first
+
+          expect(rule).to have_attributes(
+            id: recurring_transaction_rule.id,
+            method: "target",
+            grants_target_top_up: false
+          )
+        end
+      end
+    end
+
+    context "when switching a granting target rule to fixed" do
+      let(:recurring_transaction_rule) do
+        create(:recurring_transaction_rule, wallet:, method: :target, target_ongoing_balance: 300, grants_target_top_up: true)
+      end
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            method: "fixed",
+            trigger: "interval",
+            interval: "weekly",
+            paid_credits: "10",
+            granted_credits: "10"
+          }
+        ]
+      end
+
+      it "clears grants_target_top_up to nil" do
+        rule = result.wallet.reload.recurring_transaction_rules.active.first
+
+        expect(rule).to have_attributes(method: "fixed", grants_target_top_up: nil)
+      end
+    end
+
+    context "when switching a fixed rule to target without specifying grants_target_top_up" do
+      let(:recurring_transaction_rule) { create(:recurring_transaction_rule, wallet:, method: :fixed) }
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            method: "target",
+            trigger: "interval",
+            interval: "weekly",
+            target_ongoing_balance: "300"
+          }
+        ]
+      end
+
+      it "defaults grants_target_top_up to false" do
+        rule = result.wallet.reload.recurring_transaction_rules.active.first
+
+        expect(rule).to have_attributes(method: "target", grants_target_top_up: false)
+      end
+    end
+
+    context "when updating a legacy target rule that carries a nil grants_target_top_up" do
+      let(:recurring_transaction_rule) do
+        create(:recurring_transaction_rule, wallet:, method: :target, target_ongoing_balance: 300).tap do |r|
+          r.update_column(:grants_target_top_up, nil) # rubocop:disable Rails/SkipsModelValidations
+        end
+      end
+      let(:params) do
+        [
+          {
+            lago_id: recurring_transaction_rule.id,
+            trigger: "interval",
+            interval: "monthly",
+            target_ongoing_balance: "300"
+          }
+        ]
+      end
+
+      it "normalises the nil to false on save without changing the method" do
+        rule = result.wallet.reload.recurring_transaction_rules.active.first
+
+        expect(rule).to have_attributes(method: "target", grants_target_top_up: false)
       end
     end
 
@@ -290,6 +485,141 @@ RSpec.describe Wallets::RecurringTransactionRules::UpdateService do
         it "updates existing recurring transaction rule with new transaction_name" do
           rule = result.wallet.reload.recurring_transaction_rules.active.first
           expect(rule.transaction_name).to eq(expected_transaction_name)
+        end
+      end
+    end
+
+    context "with connections" do
+      let(:customer) { create(:customer) }
+      let(:wallet) { create(:wallet, customer:, organization: customer.organization) }
+      let(:stripe_connection) { create(:stripe_customer, customer:, code: "stripe_us") }
+
+      before { stripe_connection }
+
+      context "when the rule is matched by lago_id" do
+        let(:params) do
+          [
+            {
+              lago_id: recurring_transaction_rule.id,
+              trigger: "interval",
+              interval: "weekly",
+              connections: {payment: {code: "stripe_us"}}
+            }
+          ]
+        end
+
+        it "updates the rule in place and pins the connection to it" do
+          rule = result.wallet.reload.recurring_transaction_rules.active.sole
+
+          expect(rule.id).to eq(recurring_transaction_rule.id)
+          expect(rule.billing_object_connections.sole).to have_attributes(
+            category: "payment",
+            behavior: "specific",
+            payment_provider_customer_id: stripe_connection.id
+          )
+        end
+
+        it "does not leak the connections key into the rule attributes" do
+          expect(result).to be_success
+        end
+
+        context "when the rule already has an override for that category" do
+          before do
+            create(
+              :billing_object_connection,
+              owner: recurring_transaction_rule,
+              organization: wallet.organization,
+              category: "payment",
+              behavior: "skip"
+            )
+          end
+
+          it "keeps the surviving rule's row and updates it rather than duplicating" do
+            expect { result }.not_to change(BillingObjectConnection, :count)
+
+            rule = result.wallet.reload.recurring_transaction_rules.active.sole
+            expect(rule.billing_object_connections.sole).to have_attributes(
+              behavior: "specific",
+              payment_provider_customer_id: stripe_connection.id
+            )
+          end
+        end
+      end
+
+      context "when the rule is replaced because no lago_id was sent" do
+        let(:params) do
+          [
+            {
+              trigger: "interval",
+              interval: "weekly",
+              connections: {payment: {code: "stripe_us"}}
+            }
+          ]
+        end
+
+        before do
+          create(
+            :billing_object_connection,
+            owner: recurring_transaction_rule,
+            organization: wallet.organization,
+            category: "payment",
+            behavior: "skip"
+          )
+        end
+
+        it "writes fresh rows for the new rule and leaves the terminated rule's rows alone" do
+          expect { result }.to change(BillingObjectConnection, :count).by(1)
+
+          wallet = result.wallet.reload
+          new_rule = wallet.recurring_transaction_rules.active.sole
+          expect(new_rule.id).not_to eq(recurring_transaction_rule.id)
+
+          expect(new_rule.billing_object_connections.sole).to have_attributes(
+            behavior: "specific",
+            payment_provider_customer_id: stripe_connection.id
+          )
+
+          # The superseded rule is soft-terminated, never destroyed, so dependent: :destroy does
+          # not fire and its override survives on the dead rule.
+          expect(recurring_transaction_rule.reload).to be_terminated
+          expect(recurring_transaction_rule.billing_object_connections.sole.behavior).to eq("skip")
+        end
+      end
+
+      context "when a code does not resolve" do
+        let(:params) do
+          [
+            {
+              lago_id: recurring_transaction_rule.id,
+              trigger: "interval",
+              interval: "weekly",
+              connections: {payment: {code: "nope"}}
+            }
+          ]
+        end
+
+        it "fails with connection_not_found" do
+          expect(result).not_to be_success
+          expect(result.error.messages[:connections]).to include("connection_not_found")
+        end
+      end
+
+      context "when the behavior is invalid" do
+        let(:params) do
+          [
+            {
+              lago_id: recurring_transaction_rule.id,
+              trigger: "interval",
+              interval: "weekly",
+              connections: {payment: {behavior: "nonsense"}}
+            }
+          ]
+        end
+
+        it "fails before writing anything" do
+          expect { result }.not_to change(BillingObjectConnection, :count)
+          expect(result).not_to be_success
+          expect(result.error.messages[:connections]).to include("invalid_connection_behavior")
         end
       end
     end

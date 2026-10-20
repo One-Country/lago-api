@@ -28,7 +28,7 @@ RSpec.describe Api::V1::PaymentRequestsController do
 
     before do
       allow(PaymentRequests::CreateService).to receive(:call).and_return(
-        BaseService::Result.new.tap { |r| r.payment_request = payment_request }
+        PaymentRequests::CreateService::Result.new.tap { |r| r.payment_request = payment_request }
       )
     end
 
@@ -50,6 +50,40 @@ RSpec.describe Api::V1::PaymentRequestsController do
       expect(json[:payment_request][:lago_id]).to eq(payment_request.id)
       expect(json[:payment_request][:invoices].map { |i| i[:lago_id] }).to contain_exactly(invoice.id)
       expect(json[:payment_request][:customer][:lago_id]).to eq(customer.id)
+    end
+
+    context "with payment_method" do
+      let(:payment_method_id) { SecureRandom.uuid }
+      let(:params) do
+        {
+          email: customer.email,
+          external_customer_id: customer.external_id,
+          lago_invoice_ids: [invoice.id],
+          payment_method: {
+            payment_method_type: "provider",
+            payment_method_id:
+          }
+        }
+      end
+
+      it "forwards the payment method to PaymentRequests::CreateService" do
+        subject
+
+        expect(PaymentRequests::CreateService).to have_received(:call).with(
+          organization:,
+          params: {
+            email: customer.email,
+            external_customer_id: customer.external_id,
+            lago_invoice_ids: [invoice.id],
+            payment_method: {
+              payment_method_type: "provider",
+              payment_method_id:
+            }
+          }
+        )
+
+        expect(response).to have_http_status(:success)
+      end
     end
   end
 
@@ -87,6 +121,53 @@ RSpec.describe Api::V1::PaymentRequestsController do
             expect(response).to have_http_status(:success)
             expect(json[:payment_requests]).to be_empty
           end
+        end
+      end
+    end
+
+    context "when filtering by billing_entity_codes" do
+      let(:billing_entity_eu) { create(:billing_entity, organization:, code: "EU") }
+      let(:billing_entity_us) { create(:billing_entity, organization:, code: "US") }
+      let(:customer_eu) { create(:customer, organization:) }
+      let(:customer_us) { create(:customer, organization:) }
+      let(:invoice_eu) { create(:invoice, organization:, customer: customer_eu, billing_entity: billing_entity_eu) }
+      let(:invoice_us) { create(:invoice, organization:, customer: customer_us, billing_entity: billing_entity_us) }
+      let(:payment_request_eu) do
+        create(:payment_request, organization:, customer: customer_eu, invoices: [invoice_eu])
+      end
+      let(:payment_request_us) do
+        create(:payment_request, organization:, customer: customer_us, invoices: [invoice_us])
+      end
+
+      before do
+        payment_request_eu
+        payment_request_us
+      end
+
+      it "returns only payment requests under the requested billing entity" do
+        get_with_token(organization, "/api/v1/payment_requests?billing_entity_codes[]=EU")
+
+        expect(response).to have_http_status(:success)
+        expect(json[:payment_requests].map { |r| r[:lago_id] }).to contain_exactly(payment_request_eu.id)
+      end
+
+      context "when filtering by multiple billing_entity_codes" do
+        it "returns payment requests matching any of the provided codes" do
+          get_with_token(organization, "/api/v1/payment_requests?billing_entity_codes[]=EU&billing_entity_codes[]=US")
+
+          expect(response).to have_http_status(:success)
+          expect(json[:payment_requests].map { |r| r[:lago_id] }).to contain_exactly(
+            payment_request_eu.id,
+            payment_request_us.id
+          )
+        end
+      end
+
+      context "when one of the billing_entity_codes is unknown" do
+        it "returns a not found error" do
+          get_with_token(organization, "/api/v1/payment_requests?billing_entity_codes[]=EU&billing_entity_codes[]=BOGUS")
+
+          expect(response).to be_not_found_error("billing_entity")
         end
       end
     end

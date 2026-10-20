@@ -4,11 +4,12 @@ module Plans
   class UpdateService < BaseService
     Result = BaseResult[:plan]
 
-    def initialize(plan:, params:, partial_metadata: false)
+    def initialize(plan:, params:, partial_metadata: false, send_webhook: true)
       @plan = plan
       @params = params
       @timestamp = Time.current.to_i
       @partial_metadata = partial_metadata
+      @send_webhook = send_webhook
       super
     end
 
@@ -20,6 +21,13 @@ module Plans
 
     def call
       return result.not_found_failure!(resource: "plan") unless plan
+
+      if plan.organization.product_catalog_enabled?
+        legacy_field = Plans::CreateService::LEGACY_PRICING_FIELDS.find { params.key?(it) }
+        if legacy_field
+          return result.single_validation_failure!(field: legacy_field, error_code: "legacy_billing_disabled")
+        end
+      end
 
       old_amount_cents = plan.amount_cents
 
@@ -73,9 +81,9 @@ module Plans
 
       cascade_subscription_fee_update(old_amount_cents)
 
-      plan.invoices.draft.update_all(ready_to_be_refreshed: true) # rubocop:disable Rails/SkipsModelValidations
+      flag_draft_invoices_for_refresh
 
-      SendWebhookJob.perform_after_commit("plan.updated", plan)
+      SendWebhookJob.perform_after_commit("plan.updated", plan) if send_webhook
       result.plan = plan.reload
       result
     rescue ActiveRecord::RecordInvalid => e
@@ -86,9 +94,35 @@ module Plans
 
     private
 
-    attr_reader :plan, :params, :timestamp, :partial_metadata
+    attr_reader :plan, :params, :timestamp, :partial_metadata, :send_webhook
 
     delegate :organization, to: :plan
+
+    def flag_draft_invoices_for_refresh
+      matching_subscription_join = ActiveRecord::Base.sanitize_sql_array([
+        <<~SQL.squish,
+          CROSS JOIN LATERAL (
+            SELECT 1
+            FROM invoice_subscriptions
+            INNER JOIN subscriptions
+              ON subscriptions.id = invoice_subscriptions.subscription_id
+            WHERE invoice_subscriptions.invoice_id = invoices.id
+              AND subscriptions.plan_id = :plan_id
+            LIMIT 1
+          ) matching_subscription
+        SQL
+        {plan_id: plan.id}
+      ])
+
+      # Check subscriptions only for the organization's draft invoices.
+      # LIMIT 1 keeps the lateral lookup dependent on each candidate invoice.
+      invoice_ids = organization.invoices.draft
+        .joins(matching_subscription_join)
+        .select(:id)
+
+      Invoice.where(id: invoice_ids)
+        .update_all(ready_to_be_refreshed: true) # rubocop:disable Rails/SkipsModelValidations
+    end
 
     def update_metadata!
       return unless params.key?(:metadata)
@@ -153,7 +187,7 @@ module Plans
           old_parent_applied_pricing_unit_attrs:
         )
 
-        cascade_filter_changes(charge, before_filters, payload_charge[:filters]) if before_filters
+        cascade_filter_changes(charge, before_filters) if before_filters
       end
     end
 
@@ -162,21 +196,18 @@ module Plans
         {
           values: f.to_h.deep_stringify_keys,
           properties: f.properties,
-          invoice_display_name: f.invoice_display_name
+          invoice_display_name: f.invoice_display_name,
+          code: f.code
         }
       end
     end
 
-    def cascade_filter_changes(charge, before, payload_filters)
-      after = (payload_filters || []).map do |fp|
-        {
-          values: (fp[:values] || {}).deep_stringify_keys,
-          properties: fp[:properties]&.deep_stringify_keys,
-          invoice_display_name: fp[:invoice_display_name]
-        }
-      end
+    # Read back rather than reuse the payload: the codes are assigned while saving, and a child
+    # filter has to be created with the code of the parent filter it copies
+    def cascade_filter_changes(charge, before)
+      charge.filters.reset
 
-      ChargeFilters::CascadeDispatcher.call(charge:, before:, after:)
+      ChargeFilters::CascadeDispatcher.call(charge:, before:, after: capture_filters(charge))
     end
 
     def cascade_fixed_charge_removal(fixed_charge)
@@ -293,14 +324,7 @@ module Plans
     end
 
     def trigger_pay_in_advance_billing
-      plan.subscriptions.active.find_each do |subscription|
-        after_commit do
-          Invoices::CreatePayInAdvanceFixedChargesJob.perform_later(
-            subscription,
-            timestamp
-          )
-        end
-      end
+      Invoices::CreateAllPayInAdvanceFixedChargesJob.perform_after_commit(plan, timestamp)
     end
 
     def sanitize_fixed_charges(plan, args_fixed_charges, created_fixed_charges_ids)
@@ -350,10 +374,18 @@ module Plans
         next unless subscription.previous_subscription
 
         if plan.yearly_amount_cents >= subscription.previous_subscription.plan.yearly_amount_cents
+          upgrade_params = {name: subscription.name}
+
+          if subscription.activation_rules.any?
+            upgrade_params[:activation_rules] = subscription.activation_rules.map do |rule|
+              {type: rule.type, timeout_hours: rule.timeout_hours}
+            end
+          end
+
           Subscriptions::PlanUpgradeService.call(
             current_subscription: subscription.previous_subscription,
             plan: plan,
-            params: {name: subscription.name}
+            params: upgrade_params
           ).raise_if_error!
         end
       end

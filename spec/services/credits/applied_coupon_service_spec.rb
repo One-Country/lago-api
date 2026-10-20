@@ -7,8 +7,8 @@ RSpec.describe Credits::AppliedCouponService do
     described_class.new(invoice:, applied_coupon:)
   end
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
 
   let(:invoice) do
     create(
@@ -45,7 +45,7 @@ RSpec.describe Credits::AppliedCouponService do
 
   context "with lock acquired" do
     around do |spec|
-      customer.with_advisory_lock("COUPONS-#{customer.id}", &spec)
+      customer.with_advisory_lock("customer-#{customer.id}-coupon", &spec)
     end
 
     describe "call" do

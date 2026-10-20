@@ -5,21 +5,25 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Stripe::Payments::AuthorizeService do
   subject(:authorize_service) { described_class.new(amount:, currency:, provider_customer:, payment_method:, unique_id:, metadata:) }
 
+  before_all do
+    create_default(:organization)
+  end
+
   let(:amount) { 0.20 }
+  let(:provider_method_id) { "pm_from_payment_method" }
+  let(:payment_method_id) { "pm_from_provider_customer" }
+  let(:stripe_result) do
+    result = PaymentProviderCustomers::Stripe::RetrieveLatestPaymentMethodService::Result.new
+    result.payment_method_id = "pm_from_stripe"
+    result
+  end
   let(:currency) { "USD" }
   let(:provider_customer) { create(:stripe_customer, payment_provider: create(:stripe_provider), customer:, payment_method_id:) }
   let(:payment_method) { create(:payment_method, payment_provider_customer: provider_customer, provider_method_id:) }
   let(:unique_id) { SecureRandom.uuid }
   let(:metadata) { {} }
 
-  let(:customer) { create(:customer) }
-  let(:provider_method_id) { "pm_from_payment_method" }
-  let(:payment_method_id) { "pm_from_provider_customer" }
-  let(:stripe_result) do
-    result = BaseService::Result.new
-    result.payment_method_id = "pm_from_stripe"
-    result
-  end
+  let_it_be(:customer) { create(:customer) }
 
   before do
     allow(PaymentProviderCustomers::Stripe::RetrieveLatestPaymentMethodService).to receive(:call!).and_return(stripe_result)
@@ -30,7 +34,7 @@ RSpec.describe PaymentProviders::Stripe::Payments::AuthorizeService do
       let(:payment_method) { nil }
       let(:payment_method_id) { nil }
       let(:stripe_result) do
-        result = BaseService::Result.new
+        result = PaymentProviderCustomers::Stripe::RetrieveLatestPaymentMethodService::Result.new
         result.payment_method_id = nil
         result
       end
@@ -58,10 +62,43 @@ RSpec.describe PaymentProviders::Stripe::Payments::AuthorizeService do
         expect(result.stripe_payment_intent).to be(payment_intent)
       end
 
+      it "holds the funds whatever the payment method type is" do
+        subject.call
+
+        expect(::Stripe::PaymentIntent).to have_received(:create).with(
+          hash_including(capture_method: "manual"),
+          anything
+        )
+      end
+
+      it "does not restrict the manual capture to cards" do
+        subject.call
+
+        expect(::Stripe::PaymentIntent).to have_received(:create).with(
+          hash_excluding(:payment_method_options),
+          anything
+        )
+      end
+
       it "cancels the payment intent later" do
         subject.call
 
         expect(PaymentProviders::CancelPaymentAuthorizationJob).to have_been_enqueued
+      end
+
+      context "when consent collection is enabled on the provider" do
+        let(:provider_customer) do
+          create(:stripe_customer, payment_provider: create(:stripe_provider, require_terms_of_service_consent: true), customer:, payment_method_id:)
+        end
+
+        it "does not add consent collection to the payment intent" do
+          subject.call
+
+          expect(::Stripe::PaymentIntent).to have_received(:create).with(
+            hash_excluding(:consent_collection),
+            anything
+          )
+        end
       end
     end
   end

@@ -70,6 +70,27 @@ describe Clockwork do
     end
   end
 
+  describe "schedule:activate_contracts" do
+    let(:job) { "schedule:activate_contracts" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:01:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 00:31:00") }
+
+    it "enqueues an activate contracts job" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.second
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(6)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::ActivateContractsJob).to have_been_enqueued
+    end
+  end
+
   describe "schedule:process_subscription_activity" do
     let(:job) { "schedule:process_subscription_activity" }
     let(:start_time) { Time.zone.parse("1 Apr 2022 00:01:00") }
@@ -244,6 +265,48 @@ describe Clockwork do
     end
   end
 
+  describe "schedule:expire_order_forms" do
+    let(:job) { "schedule:expire_order_forms" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:30:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 01:30:00") }
+
+    it "enqueues an expire order forms job" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.minute
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(1)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::ExpireOrderFormsJob).to have_been_enqueued
+    end
+  end
+
+  describe "schedule:execute_scheduled_orders" do
+    let(:job) { "schedule:execute_scheduled_orders" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:30:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 01:30:00") }
+
+    it "enqueues an execute scheduled orders job" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.minute
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(1)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::ExecuteScheduledOrdersJob).to have_been_enqueued
+    end
+  end
+
   describe "schedule:clean_inbound_webhooks" do
     let(:job) { "schedule:clean_inbound_webhooks" }
     let(:start_time) { Time.zone.parse("1 Apr 2022 00:01:00") }
@@ -265,6 +328,27 @@ describe Clockwork do
     end
   end
 
+  describe "schedule:clean_record_deletions" do
+    let(:job) { "schedule:clean_record_deletions" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:01:00") }
+    let(:end_time) { Time.zone.parse("2 Apr 2022 00:00:00") }
+
+    it "enqueue a clean record deletions job" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.minute
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(1)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::RecordDeletionsCleanupJob).to have_been_enqueued
+    end
+  end
+
   describe "schedule:retry_inbound_webhooks" do
     let(:job) { "schedule:retry_inbound_webhooks" }
     let(:start_time) { Time.zone.parse("1 Apr 2022 00:05:00") }
@@ -283,6 +367,27 @@ describe Clockwork do
 
       Clockwork::Test.block_for(job).call
       expect(Clock::InboundWebhooksRetryJob).to have_been_enqueued
+    end
+  end
+
+  describe "schedule:reconcile_x402_settlements" do
+    let(:job) { "schedule:reconcile_x402_settlements" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:00:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 00:05:00") }
+
+    it "enqueues a reconcile x402 settlements job every minute" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.second
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(5)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::ReconcileX402SettlementsJob).to have_been_enqueued
     end
   end
 
@@ -376,6 +481,71 @@ describe Clockwork do
     end
   end
 
+  describe "schedule:refresh_wallets_ongoing_balance" do
+    let(:job) { "schedule:refresh_wallets_ongoing_balance" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:01:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 00:31:00") }
+
+    before do
+      allow(ENV).to receive(:[]).and_call_original
+      allow(ENV).to receive(:[]).with("LAGO_REDIS_CACHE_URL").and_return("redis:6379")
+      allow(ENV).to receive(:[]).with("LAGO_DISABLE_WALLET_REFRESH").and_return(nil)
+    end
+
+    it "enqueue a refresh wallets ongoing balance job" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.second
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(6)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::RefreshWalletsOngoingBalanceJob).to have_been_enqueued
+    end
+
+    context "with a custom refresh interval configured" do
+      before do
+        allow(ENV).to receive(:[]).with("LAGO_WALLET_ONGOING_BALANCE_REFRESH_INTERVAL_SECONDS").and_return("150")
+      end
+
+      it 'uses the ENV["LAGO_WALLET_ONGOING_BALANCE_REFRESH_INTERVAL_SECONDS"] to set a custom period' do
+        Clockwork::Test.run(
+          file: clock_file,
+          start_time:,
+          end_time:,
+          tick_speed: 1.second
+        )
+
+        expect(Clockwork::Test).to be_ran_job(job)
+        expect(Clockwork::Test.times_run(job)).to eq(12)
+
+        Clockwork::Test.block_for(job).call
+        expect(Clock::RefreshWalletsOngoingBalanceJob).to have_been_enqueued
+
+        expect(ENV).to have_received(:[]).with("LAGO_WALLET_ONGOING_BALANCE_REFRESH_INTERVAL_SECONDS")
+      end
+    end
+
+    context "when wallet refresh is disabled" do
+      before { allow(ENV).to receive(:[]).with("LAGO_DISABLE_WALLET_REFRESH").and_return("true") }
+
+      it "does not register the schedule" do
+        Clockwork::Test.run(
+          file: clock_file,
+          start_time:,
+          end_time:,
+          tick_speed: 1.second
+        )
+
+        expect(Clockwork::Test).not_to be_ran_job(job)
+      end
+    end
+  end
+
   describe "schedule:refresh_dedicated_org_wallets" do
     let(:job) { "schedule:refresh_dedicated_org_wallets" }
     let(:start_time) { Time.zone.parse("2025-03-27T00:05:00") }
@@ -422,6 +592,27 @@ describe Clockwork do
         Clockwork::Test.block_for(job).call
         expect(Clock::RefreshDedicatedOrgWalletsOngoingBalanceJob).to have_been_enqueued
       end
+    end
+  end
+
+  describe "schedule:process_billing_segments" do
+    let(:job) { "schedule:process_billing_segments" }
+    let(:start_time) { Time.zone.parse("1 Apr 2022 00:00:00") }
+    let(:end_time) { Time.zone.parse("1 Apr 2022 01:00:00") }
+
+    it "enqueues a process billing segments job once an hour" do
+      Clockwork::Test.run(
+        file: clock_file,
+        start_time:,
+        end_time:,
+        tick_speed: 1.second
+      )
+
+      expect(Clockwork::Test).to be_ran_job(job)
+      expect(Clockwork::Test.times_run(job)).to eq(1)
+
+      Clockwork::Test.block_for(job).call
+      expect(Clock::ProcessBillingSegmentsJob).to have_been_enqueued
     end
   end
 end

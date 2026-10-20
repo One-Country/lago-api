@@ -3,7 +3,7 @@
 require "rails_helper"
 
 RSpec.describe Invoices::ApplyInvoiceCustomSectionsService do
-  subject(:invoice_service) { described_class.new(invoice:, resource:, custom_section_ids:) }
+  subject(:invoice_service) { described_class.new(invoice:, resources:, custom_section_ids:) }
 
   let(:organization) { create(:organization) }
   let(:billing_entity) { create(:billing_entity, organization:) }
@@ -12,12 +12,60 @@ RSpec.describe Invoices::ApplyInvoiceCustomSectionsService do
   let(:custom_section_1) { create(:invoice_custom_section, organization:) }
   let(:custom_section_2) { create(:invoice_custom_section, organization:) }
   let(:custom_section_3) { create(:invoice_custom_section, organization:) }
-  let(:resource) { nil }
+  let(:resources) { [] }
   let(:custom_section_ids) { [] }
 
   before do
     create(:billing_entity_applied_invoice_custom_section, organization:, billing_entity:, invoice_custom_section: custom_section_1)
     create(:billing_entity_applied_invoice_custom_section, organization:, billing_entity:, invoice_custom_section: custom_section_2)
+  end
+
+  describe "Resource.from" do
+    subject(:resource) { described_class::Resource.from(resource: record) }
+
+    context "with a subscription" do
+      let(:record) { build_stubbed(:subscription) }
+
+      it "exposes the subscription's section settings" do
+        expect(resource.skip_invoice_custom_sections).to eq(record.skip_invoice_custom_sections)
+        expect(resource.selected_invoice_custom_sections.proxy_association.owner).to eq(record)
+      end
+    end
+
+    context "with a contract" do
+      let(:record) { build_stubbed(:contract) }
+
+      it "exposes the contract's section settings" do
+        expect(resource.skip_invoice_custom_sections).to eq(record.skip_invoice_custom_sections)
+        expect(resource.selected_invoice_custom_sections.proxy_association.owner).to eq(record)
+      end
+    end
+
+    context "with a wallet" do
+      let(:record) { build_stubbed(:wallet) }
+
+      it "exposes the wallet's section settings" do
+        expect(resource.skip_invoice_custom_sections).to eq(record.skip_invoice_custom_sections)
+        expect(resource.selected_invoice_custom_sections.proxy_association.owner).to eq(record)
+      end
+    end
+
+    context "with a wallet transaction" do
+      let(:record) { build_stubbed(:wallet_transaction) }
+
+      it "exposes the transaction's section settings" do
+        expect(resource.skip_invoice_custom_sections).to eq(record.skip_invoice_custom_sections)
+        expect(resource.selected_invoice_custom_sections.proxy_association.owner).to eq(record)
+      end
+    end
+
+    context "with an unsupported record" do
+      let(:record) { build_stubbed(:customer) }
+
+      it "rejects the record" do
+        expect { resource }.to raise_error(ArgumentError, "unsupported invoice custom section resource")
+      end
+    end
   end
 
   describe "#call" do
@@ -71,11 +119,12 @@ RSpec.describe Invoices::ApplyInvoiceCustomSectionsService do
       end
     end
 
-    context "with subscription source" do
-      let(:resource) { create(:subscription, customer:, organization:) }
+    context "with a single resource" do
+      let(:subscription) { create(:subscription, customer:, organization:) }
+      let(:resources) { [described_class::Resource.from(resource: subscription)] }
 
       context "when skip_invoice_custom_sections is true" do
-        let(:resource) { create(:subscription, customer:, organization:, skip_invoice_custom_sections: true) }
+        let(:subscription) { create(:subscription, customer:, organization:, skip_invoice_custom_sections: true) }
 
         it "does not attach custom sections on the invoice" do
           result = invoice_service.call
@@ -117,7 +166,7 @@ RSpec.describe Invoices::ApplyInvoiceCustomSectionsService do
 
       context "when skip_invoice_custom_sections is false and there are attached custom sections" do
         before do
-          create(:subscription_applied_invoice_custom_section, organization:, subscription: resource, invoice_custom_section: custom_section_2)
+          create(:subscription_applied_invoice_custom_section, organization:, subscription:, invoice_custom_section: custom_section_2)
         end
 
         it "applies custom sections from the subscription" do
@@ -128,6 +177,175 @@ RSpec.describe Invoices::ApplyInvoiceCustomSectionsService do
           expect(sections.map(&:details)).to contain_exactly(custom_section_2.details)
           expect(sections.map(&:display_name)).to contain_exactly(custom_section_2.display_name)
           expect(sections.map(&:name)).to contain_exactly(custom_section_2.name)
+        end
+      end
+    end
+
+    context "with multiple resources" do
+      let(:subscription_a) { create(:subscription, customer:, organization:) }
+      let(:subscription_b) { create(:subscription, customer:, organization:) }
+      let(:resources) do
+        [subscription_a, subscription_b].map { |subscription| described_class::Resource.from(resource: subscription) }
+      end
+
+      context "when no resource has ICS" do
+        it "falls back to customer sections" do
+          result = invoice_service.call
+          expect(result).to be_success
+          sections = invoice.applied_invoice_custom_sections.reload
+          expect(sections.map(&:code)).to contain_exactly(custom_section_1.code, custom_section_2.code)
+        end
+      end
+
+      context "when all resources have ICS" do
+        before do
+          create(:subscription_applied_invoice_custom_section, organization:, subscription: subscription_a, invoice_custom_section: custom_section_1)
+          create(:subscription_applied_invoice_custom_section, organization:, subscription: subscription_b, invoice_custom_section: custom_section_2)
+        end
+
+        it "merges ICS from all resources" do
+          result = invoice_service.call
+          expect(result).to be_success
+          sections = invoice.applied_invoice_custom_sections.reload
+          expect(sections.map(&:code)).to contain_exactly(custom_section_1.code, custom_section_2.code)
+        end
+      end
+
+      context "when some resources have ICS and some do not" do
+        before do
+          create(:subscription_applied_invoice_custom_section, organization:, subscription: subscription_a, invoice_custom_section: custom_section_1)
+          create(:customer_applied_invoice_custom_section, organization:, billing_entity:, customer:, invoice_custom_section: custom_section_3)
+        end
+
+        it "merges resource ICS with customer sections" do
+          result = invoice_service.call
+          expect(result).to be_success
+          sections = invoice.applied_invoice_custom_sections.reload
+          expect(sections.map(&:code)).to contain_exactly(custom_section_1.code, custom_section_3.code)
+        end
+      end
+
+      context "when all resources have skip_invoice_custom_sections" do
+        let(:subscription_a) { create(:subscription, customer:, organization:, skip_invoice_custom_sections: true) }
+        let(:subscription_b) { create(:subscription, customer:, organization:, skip_invoice_custom_sections: true) }
+
+        it "does not apply any custom sections" do
+          result = invoice_service.call
+          expect(result).to be_success
+          expect(result.applied_sections).to be_empty
+          expect(invoice.reload.applied_invoice_custom_sections).to be_empty
+        end
+      end
+
+      context "when one resource skips and another has ICS" do
+        let(:subscription_a) { create(:subscription, customer:, organization:, skip_invoice_custom_sections: true) }
+
+        before do
+          create(:subscription_applied_invoice_custom_section, organization:, subscription: subscription_b, invoice_custom_section: custom_section_2)
+        end
+
+        it "applies only the non-skipping resource's ICS" do
+          result = invoice_service.call
+          expect(result).to be_success
+          sections = invoice.applied_invoice_custom_sections.reload
+          expect(sections.map(&:code)).to contain_exactly(custom_section_2.code)
+        end
+      end
+    end
+
+    context "with contract resources" do
+      let(:contract_a) { create(:contract, customer:, organization:) }
+      let(:contract_b) { create(:contract, customer:, organization:) }
+      let(:resources) do
+        [contract_a, contract_b].map { |contract| described_class::Resource.from(resource: contract) }
+      end
+
+      context "when both contracts select sections" do
+        before do
+          create(:contract_applied_invoice_custom_section, organization:, contract: contract_a, invoice_custom_section: custom_section_1)
+          create(:contract_applied_invoice_custom_section, organization:, contract: contract_b, invoice_custom_section: custom_section_2)
+        end
+
+        it "applies sections from both contracts" do
+          invoice_service.call
+
+          expect(invoice.applied_invoice_custom_sections.reload.map(&:code)).to match_array([custom_section_1.code, custom_section_2.code])
+        end
+      end
+
+      context "when one contract selects sections and the other has none" do
+        before do
+          create(:contract_applied_invoice_custom_section, organization:, contract: contract_a, invoice_custom_section: custom_section_3)
+        end
+
+        it "combines the selection with the customer fallback" do
+          invoice_service.call
+
+          expect(invoice.applied_invoice_custom_sections.reload.map(&:code)).to match_array([custom_section_1.code, custom_section_2.code, custom_section_3.code])
+        end
+      end
+
+      context "when one contract skips sections" do
+        let(:contract_a) { create(:contract, customer:, organization:, skip_invoice_custom_sections: true) }
+
+        before do
+          create(:contract_applied_invoice_custom_section, organization:, contract: contract_b, invoice_custom_section: custom_section_3)
+        end
+
+        it "only applies the participating contract's selection" do
+          invoice_service.call
+
+          expect(invoice.applied_invoice_custom_sections.reload.map(&:code)).to eq([custom_section_3.code])
+        end
+      end
+
+      context "when both contracts skip sections" do
+        let(:contract_a) { create(:contract, customer:, organization:, skip_invoice_custom_sections: true) }
+        let(:contract_b) { create(:contract, customer:, organization:, skip_invoice_custom_sections: true) }
+
+        it "does not fall back to customer sections" do
+          expect(invoice_service.call.applied_sections).to be_empty
+        end
+      end
+
+      context "when manual sections are provided" do
+        let(:custom_section_ids) { [custom_section_3.id] }
+        let(:system_section) { create(:invoice_custom_section, :system_generated, organization:) }
+
+        before do
+          create(:contract_applied_invoice_custom_section, organization:, contract: contract_a, invoice_custom_section: custom_section_1)
+          create(:customer_applied_invoice_custom_section, organization:, billing_entity:, customer:, invoice_custom_section: system_section)
+        end
+
+        it "uses the manual selection and keeps the system-generated section" do
+          invoice_service.call
+
+          expect(invoice.applied_invoice_custom_sections.reload.map(&:code)).to match_array([custom_section_3.code, system_section.code])
+        end
+      end
+    end
+
+    context "with a wallet section resource" do
+      let(:section_resource) { create(:wallet, customer:) }
+      let(:resources) { [described_class::Resource.from(resource: section_resource)] }
+
+      context "when the wallet selects a section" do
+        before do
+          create(:wallet_applied_invoice_custom_section, organization:, wallet: section_resource, invoice_custom_section: custom_section_3)
+        end
+
+        it "applies the wallet selection instead of the customer fallback" do
+          invoice_service.call
+
+          expect(invoice.applied_invoice_custom_sections.reload.map(&:code)).to eq([custom_section_3.code])
+        end
+      end
+
+      context "when the wallet skips sections" do
+        let(:section_resource) { create(:wallet, customer:, skip_invoice_custom_sections: true) }
+
+        it "does not apply customer fallback sections" do
+          expect(invoice_service.call.applied_sections).to be_empty
         end
       end
     end

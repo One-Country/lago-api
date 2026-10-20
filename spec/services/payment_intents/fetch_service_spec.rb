@@ -4,6 +4,11 @@ RSpec.describe PaymentIntents::FetchService do
   describe ".call" do
     subject(:result) { described_class.call(invoice:) }
 
+    before_all do
+      create_default(:organization)
+      create_default(:customer)
+    end
+
     context "when invoice does not exist" do
       let(:invoice) { nil }
 
@@ -15,19 +20,20 @@ RSpec.describe PaymentIntents::FetchService do
 
     context "when invoice exists" do
       let(:invoice) { create(:invoice) }
-      let(:payment_provider_service) { instance_double("PaymentProviderService") }
+      let(:payment_provider_service) { class_double(Invoices::Payments::StripeService) }
       let(:payment_url) { "https://example.com/payment" }
+      let(:generate_payment_url_result) { Invoices::Payments::StripeService::RESULTS.fetch(:generate_payment_url).new }
 
       before do
         allow(Invoices::Payments::PaymentProviders::Factory)
-          .to receive(:new_instance)
-          .with(invoice:)
+          .to receive(:for)
+          .with(invoice)
           .and_return(payment_provider_service)
 
         allow(payment_provider_service)
-          .to receive(:generate_payment_url)
-          .with(instance_of(PaymentIntent))
-          .and_return(BaseService::Result.new.tap { |r| r.payment_url = payment_url })
+          .to receive(:call!)
+          .with(:generate_payment_url, invoice, instance_of(PaymentIntent))
+          .and_return(generate_payment_url_result.tap { |r| r.payment_url = payment_url })
       end
 
       context "when active payment intent exists" do
@@ -36,7 +42,7 @@ RSpec.describe PaymentIntents::FetchService do
         it "returns the existing payment intent" do
           expect(result).to be_success
           expect(result.payment_intent).to eq(payment_intent)
-          expect(payment_provider_service).not_to have_received(:generate_payment_url)
+          expect(payment_provider_service).not_to have_received(:call!)
         end
       end
 
@@ -47,15 +53,28 @@ RSpec.describe PaymentIntents::FetchService do
           expect(result).to be_success
           expect(result.payment_intent).to eq(payment_intent)
           expect(result.payment_intent.payment_url).to eq(payment_url)
-          expect(payment_provider_service).to have_received(:generate_payment_url)
+          expect(payment_provider_service).to have_received(:call!).with(:generate_payment_url, invoice, instance_of(PaymentIntent))
+        end
+
+        it "persists the provider session id returned by the provider" do
+          allow(payment_provider_service)
+            .to receive(:call!)
+            .with(:generate_payment_url, invoice, instance_of(PaymentIntent))
+            .and_return(generate_payment_url_result.tap do |r|
+              r.payment_url = payment_url
+              r.provider_session_id = "cs_123"
+            end)
+
+          expect(result.payment_intent.provider_session_id).to eq("cs_123")
         end
       end
 
       context "when payment provider fails to generate URL" do
         before do
           allow(payment_provider_service)
-            .to receive(:generate_payment_url)
-            .and_return(BaseService::Result.new.tap { |r| r.payment_url = nil })
+            .to receive(:call!)
+            .with(:generate_payment_url, invoice, instance_of(PaymentIntent))
+            .and_return(generate_payment_url_result.tap { |r| r.payment_url = nil })
         end
 
         it "fails with payment provider error" do
@@ -74,7 +93,7 @@ RSpec.describe PaymentIntents::FetchService do
         it "returns new payment intent" do
           expect(result).to be_success
           expect(result.payment_intent.payment_url).to eq(payment_url)
-          expect(payment_provider_service).to have_received(:generate_payment_url)
+          expect(payment_provider_service).to have_received(:call!).with(:generate_payment_url, invoice, instance_of(PaymentIntent))
         end
       end
     end

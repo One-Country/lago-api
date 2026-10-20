@@ -8,13 +8,14 @@ RSpec.describe QuotesQuery do
   end
 
   let(:returned_ids) { result.quotes.pluck(:id) }
-  let(:pagination) { nil }
-  let(:filters) { {} }
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
   let(:quote_draft) { create(:quote, :with_version, organization:, customer:, created_at: 8.days.ago) }
   let(:quote_approved) { create(:quote, :with_version, version_trait: :approved, organization:, customer:, created_at: 6.days.ago) }
   let(:quote_voided) { create(:quote, :with_version, version_trait: :voided, organization:, customer:, created_at: 4.days.ago) }
+  let(:pagination) { nil }
+  let(:filters) { {} }
+
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
 
   before do
     quote_draft
@@ -67,6 +68,33 @@ RSpec.describe QuotesQuery do
         it "returns a validation failure" do
           expect(result).not_to be_success
           expect(result.error).to be_a(BaseService::ValidationFailure)
+        end
+      end
+    end
+
+    describe "external_customer_ids" do
+      context "when filtering by an existing external customer id" do
+        let(:other_customer) { create(:customer, organization:) }
+        let(:other_quote) { create(:quote, :with_version, organization:, customer: other_customer) }
+        let(:filters) { {external_customer_ids: [other_customer.external_id]} }
+
+        before do
+          other_quote
+        end
+
+        it "returns only that customer's quotes" do
+          expect(result).to be_success
+          expect(returned_ids.count).to eq(1)
+          expect(returned_ids).to include(other_quote.id)
+        end
+      end
+
+      context "when filtering by an unknown external customer id" do
+        let(:filters) { {external_customer_ids: ["unknown"]} }
+
+        it "returns no quotes" do
+          expect(result).to be_success
+          expect(returned_ids).to be_empty
         end
       end
     end

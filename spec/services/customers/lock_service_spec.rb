@@ -17,6 +17,26 @@ RSpec.describe Customers::LockService do
     end
   end
 
+  describe "lock scoping" do
+    described_class::VALID_SCOPES.each do |scope|
+      context "with the #{scope} scope", transaction: false do
+        subject(:lock_service) { described_class.new(customer:, scope:, timeout_seconds: 0.seconds) }
+
+        around do |test|
+          with_advisory_lock("customer-#{customer.id}-#{scope}", lock_released_after: 2.seconds) do
+            test.run
+          end
+        end
+
+        it "locks on the customer and scope key" do
+          expect do
+            lock_service.call { nil }
+          end.to raise_error(BaseLockService::FailedToAcquireLock, "Failed to acquire lock customer-#{customer.id}-#{scope}")
+        end
+      end
+    end
+  end
+
   describe "#call" do
     subject { lock_service.call }
 
@@ -32,6 +52,22 @@ RSpec.describe Customers::LockService do
       end
     end
 
+    context "when no transaction is open", transaction: false do
+      let(:held_advisory_locks) do
+        "SELECT count(*) FROM pg_locks WHERE locktype = 'advisory' AND granted AND pid = pg_backend_pid()"
+      end
+
+      it "holds the lock until the block returns" do
+        expect(ApplicationRecord.connection).not_to be_transaction_open
+
+        lock_service.call do
+          expect(ApplicationRecord.connection.select_value(held_advisory_locks)).to eq(1)
+        end
+
+        expect(ApplicationRecord.connection.select_value(held_advisory_locks)).to eq(0)
+      end
+    end
+
     context "when lock cannot be acquired", transaction: false do
       let(:timeout_seconds) { 0.seconds }
 
@@ -41,10 +77,10 @@ RSpec.describe Customers::LockService do
         end
       end
 
-      it "raises a Customers::FailedToAcquireLock error" do
+      it "raises a BaseLockService::FailedToAcquireLock error" do
         expect do
           lock_service.call { nil }
-        end.to raise_error(Customers::FailedToAcquireLock, "Failed to acquire lock customer-#{customer.id}-prepaid_credit")
+        end.to raise_error(BaseLockService::FailedToAcquireLock, "Failed to acquire lock customer-#{customer.id}-prepaid_credit")
       end
     end
   end

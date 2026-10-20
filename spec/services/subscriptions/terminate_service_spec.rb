@@ -52,6 +52,50 @@ RSpec.describe Subscriptions::TerminateService do
       expect { subject }.to have_enqueued_job_after_commit(SendWebhookJob).with("subscription.terminated", subscription)
     end
 
+    context "with concurrent termination requests", transaction: false do
+      subject(:concurrent_terminations) do
+        errors = Concurrent::Array.new
+        results = Concurrent::Array.new
+
+        threads = subscriptions.map do |current_subscription|
+          Thread.new do
+            ActiveRecord::Base.connection_pool.with_connection do
+              results << described_class.call(subscription: current_subscription, async: false)
+            end
+          rescue => e
+            errors << e
+          end
+        end
+
+        threads.each(&:join)
+
+        {errors:, results:}
+      end
+
+      let(:subscriptions) { Array.new(2) { Subscription.find(subscription.id) } }
+
+      before do
+        subscriptions
+        allow(Invoices::SubscriptionService).to receive(:call).and_wrap_original do |original, **arguments|
+          sleep 0.2
+          original.call(**arguments)
+        end
+        allow(Utils::ActivityLog).to receive(:produce_after_commit)
+      end
+
+      it "serializes termination and bills the subscription once" do
+        execution = concurrent_terminations
+
+        expect(execution[:errors]).to be_empty
+        expect(execution[:results].count(&:success?)).to eq(2)
+        expect(subscription.reload).to be_terminated
+        expect(subscription.invoice_subscriptions.subscription_terminating.count).to eq(1)
+        expect(Invoices::SubscriptionService).to have_received(:call).once
+        expect(SendWebhookJob).to have_been_enqueued.with("subscription.terminated", subscription).once
+        expect(Utils::ActivityLog).to have_received(:produce_after_commit).with(subscription, "subscription.terminated").once
+      end
+    end
+
     context "when subscription is starting in the future" do
       let(:subscription) { create(:subscription, :pending) }
 
@@ -94,12 +138,132 @@ RSpec.describe Subscriptions::TerminateService do
       end
     end
 
-    context "when subscription is incomplete" do
-      let(:subscription) { create(:subscription, :incomplete) }
+    context "when subscription is canceled" do
+      let(:subscription) { create(:subscription, :canceled) }
 
-      it "returns a not allowed error" do
-        expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
-        expect(result.error.code).to eq("subscription_incomplete")
+      it "returns a validation error" do
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq({base: ["subscription_canceled"]})
+      end
+
+      it "does not terminate it" do
+        result
+
+        expect(subscription.reload).to be_canceled
+        expect(subscription.terminated_at).to be_nil
+      end
+    end
+
+    context "when subscription is incomplete" do
+      let(:organization) { create(:organization) }
+      let(:customer) { create(:customer, organization:) }
+      let(:plan) { create(:plan, organization:, pay_in_advance: true) }
+      let(:subscription) { create(:subscription, :incomplete, customer:, organization:, plan:) }
+      let(:invoice) { create(:invoice, :open, customer:, organization:, invoice_type: :subscription) }
+
+      before do
+        create(:subscription_activation_rule, subscription:, organization:, status: "pending", timeout_hours: 48)
+        create(:invoice_subscription, invoice:, subscription:)
+      end
+
+      it "cancels the subscription" do
+        expect(result).to be_success
+        expect(result.subscription).to be_canceled
+        expect(result.subscription.cancellation_reason).to eq("manual")
+        expect(result.subscription.terminated_at).to be_nil
+      end
+
+      it "declines the payment activation rule and closes the gating invoice" do
+        result
+
+        expect(subscription.activation_rules.payment.sole).to be_declined
+        expect(invoice.reload).to be_closed
+      end
+
+      it "enqueues a subscription.canceled webhook" do
+        expect { result }.to have_enqueued_job_after_commit(SendWebhookJob).with("subscription.canceled", subscription)
+      end
+
+      it "does not enqueue a subscription.terminated webhook" do
+        result
+
+        expect(SendWebhookJob).not_to have_been_enqueued.with("subscription.terminated", subscription)
+      end
+
+      context "when the subscription becomes incomplete before it is locked" do
+        subject(:result) { described_class.call(subscription: stale_subscription) }
+
+        let(:subscription) { create(:subscription, :pending, customer:, organization:, plan:) }
+        let(:stale_subscription) { Subscription.find(subscription.id) }
+
+        before do
+          stale_subscription
+          subscription.mark_as_incomplete!
+        end
+
+        it "uses the incomplete subscription cancellation path" do
+          expect(result).to be_success
+          expect(result.subscription).to be_canceled
+          expect(subscription.activation_rules.payment.sole).to be_declined
+          expect(invoice.reload).to be_closed
+          expect(BillSubscriptionJob).not_to have_been_enqueued
+        end
+      end
+
+      context "when activation cancellation loses a concurrent resolution" do
+        let(:cancel_result) do
+          Subscriptions::ActivationRules::CancelService::Result.new.tap do |result|
+            result.single_validation_failure!(
+              field: :subscription,
+              error_code: "subscription_already_resolved"
+            )
+          end
+        end
+
+        before do
+          allow(Subscriptions::ActivationRules::CancelService)
+            .to receive(:call!)
+            .and_raise(cancel_result.error)
+        end
+
+        it "returns the cancellation failure" do
+          result
+
+          expect(result).to be_failure
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages).to eq({subscription: ["subscription_already_resolved"]})
+        end
+      end
+
+      context "when on_termination_credit_note and on_termination_invoice are given" do
+        subject(:result) do
+          described_class.call(subscription:, on_termination_credit_note: "refund", on_termination_invoice: "generate")
+        end
+
+        it "ignores them because nothing was ever billed" do
+          expect { result }.not_to have_enqueued_job(BillSubscriptionJob)
+          expect(subscription.reload.on_termination_credit_note).to be_nil
+          expect(CreditNote.count).to eq(0)
+        end
+      end
+    end
+
+    context "when a stale incomplete subscription becomes active before it is locked" do
+      subject(:result) { described_class.call(subscription: stale_subscription) }
+
+      let(:subscription) { create(:subscription, :incomplete) }
+      let(:stale_subscription) { Subscription.find(subscription.id) }
+
+      before do
+        stale_subscription
+        subscription.mark_as_active!
+      end
+
+      it "uses the active subscription termination path" do
+        expect(result).to be_success
+        expect(result.subscription).to be_terminated
+        expect(BillSubscriptionJob).to have_been_enqueued.once
+        expect(SendWebhookJob).to have_been_enqueued.with("subscription.terminated", subscription).once
       end
     end
 
@@ -130,6 +294,50 @@ RSpec.describe Subscriptions::TerminateService do
 
         expect(result).to be_success
         expect(next_subscription.reload).to be_canceled
+      end
+
+      context "when called with upgrade: true" do
+        subject(:result) { described_class.call(subscription:, on_termination_credit_note:, upgrade: true) }
+
+        it "does not cancel the next subscription" do
+          subject
+
+          expect(result).to be_success
+          expect(next_subscription.reload).to be_pending
+        end
+      end
+    end
+
+    context "when incomplete next subscription" do
+      let(:subscription) { create(:subscription) }
+      let(:next_subscription) do
+        create(
+          :subscription,
+          previous_subscription: subscription,
+          status: :incomplete
+        )
+      end
+
+      before { next_subscription }
+
+      it "returns a validation error" do
+        subject
+
+        expect(result).to be_failure
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq({base: ["next_subscription_incomplete"]})
+      end
+
+      context "when called with upgrade: true" do
+        subject(:result) { described_class.call(subscription:, on_termination_credit_note:, upgrade: true) }
+
+        it "terminates the subscription and leaves the next subscription untouched" do
+          subject
+
+          expect(result).to be_success
+          expect(subscription.reload).to be_terminated
+          expect(next_subscription.reload).to be_incomplete
+        end
       end
     end
 
@@ -391,78 +599,63 @@ RSpec.describe Subscriptions::TerminateService do
     let(:subscription) { create(:subscription) }
     let(:next_subscription) { create(:subscription, :pending, previous_subscription_id: subscription.id) }
     let(:timestamp) { Time.zone.now.to_i }
+    let(:activation_result) { Subscriptions::ActivateService::Result.new.tap { |r| r.subscription = next_subscription } }
 
     before do
       next_subscription
+      allow(Subscriptions::ActivateService).to receive(:call!).and_return(activation_result)
     end
 
-    it "terminates the subscription" do
+    it "delegates to ActivateService with the next subscription" do
+      terminate_service.terminate_and_start_next(timestamp:)
+
+      expect(Subscriptions::ActivateService).to have_received(:call!)
+        .with(subscription: next_subscription, timestamp: Time.zone.at(timestamp))
+    end
+
+    it "returns the activated subscription in the result" do
       result = terminate_service.terminate_and_start_next(timestamp:)
 
       expect(result).to be_success
-      expect(subscription.reload).to be_terminated
+      expect(result.subscription).to eq(next_subscription)
     end
 
-    it "starts the next subscription" do
-      result = terminate_service.terminate_and_start_next(timestamp:)
+    context "when there is no next subscription" do
+      let(:next_subscription) { nil }
 
-      expect(result).to be_success
-      expect(result.subscription.id).to eq(next_subscription.id)
-      expect(result.subscription).to be_active
-    end
-
-    it "enqueues a SendWebhookJob" do
-      terminate_service.terminate_and_start_next(timestamp:)
-      expect(SendWebhookJob).to have_been_enqueued.with("subscription.terminated", subscription)
-      expect(SendWebhookJob).to have_been_enqueued.with("subscription.started", next_subscription)
-    end
-
-    it "produces the activity logs" do
-      terminate_service.terminate_and_start_next(timestamp:)
-      expect(Utils::ActivityLog).to have_produced("subscription.terminated").with(subscription)
-      expect(Utils::ActivityLog).to have_produced("subscription.started").with(next_subscription)
-    end
-
-    context "when plan has fixed charges" do
-      let(:fixed_charge) { create(:fixed_charge, plan: next_subscription.plan) }
-
-      before { fixed_charge }
-
-      it "creates fixed charge events for the new subscription" do
-        result = terminate_service.terminate_and_start_next(timestamp:)
-        expect(result.subscription.fixed_charge_events.pluck(:fixed_charge_id, :timestamp))
-          .to match_array([[fixed_charge.id, be_within(5.seconds).of(Time.zone.at(timestamp))]])
-      end
-    end
-
-    context "when terminated subscription is payed in arrear" do
-      before { subscription.plan.update!(pay_in_advance: false) }
-
-      it "enqueues a job to bill the existing subscription" do
-        expect do
-          terminate_service.terminate_and_start_next(timestamp:)
-        end.to have_enqueued_job(BillSubscriptionJob).and have_enqueued_job(BillNonInvoiceableFeesJob)
-      end
-    end
-
-    context "when next subscription is payed in advance" do
-      let(:plan) { create(:plan, :pay_in_advance) }
-      let(:subscription) { create(:subscription, plan:) }
-      let(:next_subscription_plan) { create(:plan, :pay_in_advance) }
-      let(:next_subscription) do
-        create(
-          :subscription,
-          previous_subscription_id: subscription.id,
-          plan: next_subscription_plan,
-          status: :pending
-        )
-      end
-
-      it "enqueues one job" do
+      it "does not delegate to ActivateService" do
         terminate_service.terminate_and_start_next(timestamp:)
 
-        expect(BillSubscriptionJob).to have_been_enqueued
-          .with([subscription, next_subscription], timestamp, invoicing_reason: :upgrading)
+        expect(Subscriptions::ActivateService).not_to have_received(:call!)
+      end
+    end
+
+    context "when the next subscription is not pending" do
+      let(:next_subscription) do
+        create(:subscription, previous_subscription_id: subscription.id, status: :active)
+      end
+
+      it "does not delegate to ActivateService" do
+        terminate_service.terminate_and_start_next(timestamp:)
+
+        expect(Subscriptions::ActivateService).not_to have_received(:call!)
+      end
+    end
+
+    context "when ActivateService fails" do
+      let(:activation_result) do
+        Subscriptions::ActivateService::Result.new.tap do |result|
+          result.record_validation_failure!(record: next_subscription)
+        end
+      end
+
+      before do
+        allow(Subscriptions::ActivateService).to receive(:call!) { activation_result.raise_if_error! }
+      end
+
+      it "lets the error propagate so the job can retry" do
+        expect { terminate_service.terminate_and_start_next(timestamp:) }
+          .to raise_error(BaseService::FailedResult)
       end
     end
   end

@@ -16,7 +16,8 @@ module V1
             billable_metric: billable_metric_data(fee),
             filters: cached_filters(fees),
             grouped_usage: cached_grouped_usage(fees),
-            presentation_breakdowns: PresentationBreakdownBuilder.call(fees, filter: PresentationBreakdownBuilder::UNGROUPED)
+            presentation_breakdowns: V1::Customers::PresentationBreakdownBuilder.call(fees, filter: V1::Customers::PresentationBreakdownBuilder::UNGROUPED, filter_breakdown: V1::Customers::PresentationBreakdownBuilder::ALL),
+            projected_presentation_breakdowns: project_ungrouped_presentation_breakdowns(fees)
           }
         end
       end
@@ -51,73 +52,12 @@ module V1
       end
 
       def projected_usage_data(fees)
-        projection = memoized_projection(fees)
+        projection = projections.for(fees)
 
         {
-          projected_units: projection[:units].to_s,
-          projected_amount_cents: projection[:amount_cents].to_i
-        }
-      end
-
-      def calculate_projection(fees)
-        if charge_has_filters?(fees)
-          calculate_filtered_projection(fees)
-        elsif charge_has_grouping?(fees)
-          calculate_grouped_projection(fees)
-        else
-          calculate_simple_projection(fees)
-        end
-      end
-
-      def charge_has_filters?(fees)
-        fees.first.charge&.filters&.any?
-      end
-
-      def charge_has_grouping?(fees)
-        fees.any? { |f| f.grouped_by.present? }
-      end
-
-      def calculate_filtered_projection(fees)
-        fees_with_defined_filters = fees.select(&:charge_filter_id)
-
-        fees_with_defined_filters.reduce(initial_projection_values) do |totals, fee|
-          result = ::Fees::ProjectionService.call!(fees: [fee])
-          accumulate_projection(totals, result)
-        end
-      end
-
-      def calculate_grouped_projection(fees)
-        grouped_fees = fees.group_by(&:grouped_by).values
-
-        grouped_fees.reduce(initial_projection_values) do |totals, group_fee_list|
-          result = ::Fees::ProjectionService.call!(fees: group_fee_list)
-          accumulate_projection(totals, result)
-        end
-      end
-
-      def calculate_simple_projection(fees)
-        result = ::Fees::ProjectionService.call!(fees: fees)
-
-        {
-          units: result.projected_units,
-          amount_cents: result.projected_amount_cents,
-          pricing_unit_amount_cents: result.projected_pricing_unit_amount_cents.to_i
-        }
-      end
-
-      def initial_projection_values
-        {
-          units: BigDecimal("0.0"),
-          amount_cents: 0,
-          pricing_unit_amount_cents: 0
-        }
-      end
-
-      def accumulate_projection(totals, result)
-        {
-          units: totals[:units] + result.projected_units,
-          amount_cents: totals[:amount_cents] + result.projected_amount_cents,
-          pricing_unit_amount_cents: totals[:pricing_unit_amount_cents] + result.projected_pricing_unit_amount_cents.to_i
+          projected_units: projection.units.to_s,
+          projected_amount_cents: projection.amount_cents.to_i,
+          projected_presentation_breakdowns: serialize_breakdowns(projection.presentation_breakdowns)
         }
       end
 
@@ -133,7 +73,7 @@ module V1
       end
 
       def projected_pricing_unit_amount_cents(fees)
-        memoized_projection(fees)[:pricing_unit_amount_cents]
+        projections.for(fees).pricing_unit_amount_cents.to_i
       end
 
       def charge_data(fee)
@@ -180,7 +120,12 @@ module V1
         {
           **usage_data.except(:amount_currency),
           invoice_display_name: charge_filter&.invoice_display_name,
-          values: charge_filter&.to_h
+          values: charge_filter&.to_h,
+          presentation_breakdowns: V1::Customers::PresentationBreakdownBuilder.call(
+            grouped_fees,
+            filter: V1::Customers::PresentationBreakdownBuilder::ALL,
+            filter_breakdown: V1::Customers::PresentationBreakdownBuilder::ALL
+          )
         }
       end
 
@@ -210,25 +155,34 @@ module V1
           **usage_data.except(:amount_currency),
           grouped_by: grouped_fees.first.grouped_by,
           filters: filters(grouped_fees),
-          presentation_breakdowns: PresentationBreakdownBuilder.call(grouped_fees, filter: PresentationBreakdownBuilder::GROUPED)
+          presentation_breakdowns: V1::Customers::PresentationBreakdownBuilder.call(grouped_fees, filter: V1::Customers::PresentationBreakdownBuilder::GROUPED, filter_breakdown: V1::Customers::PresentationBreakdownBuilder::ALL)
         }
       end
 
       def precompute_groupings
         {
-          by_charge_filter: model.group_by { |f| f.charge_filter&.id },
-          by_grouped_by: model.group_by(&:grouped_by)
+          by_charge_filter: model.group_by { |f| [f.charge_id, f.charge_filter&.id] },
+          by_grouped_by: model.group_by { |f| [f.charge_id, f.grouped_by] }
         }
-      end
-
-      def memoized_projection(fees)
-        @projections ||= {}
-        @projections[fees.object_id] ||= calculate_projection(fees)
       end
 
       def memoized_usage_data(fees)
         @usage_data_cache ||= {}
         @usage_data_cache[fees.object_id] ||= calculate_usage_data(fees)
+      end
+
+      def project_ungrouped_presentation_breakdowns(fees)
+        ungrouped_fees = fees.reject { |f| f.grouped_by.present? }
+
+        serialize_breakdowns(projections.for(ungrouped_fees).presentation_breakdowns)
+      end
+
+      def serialize_breakdowns(breakdowns)
+        breakdowns.map { |breakdown| ::V1::PresentationBreakdownSerializer.new(breakdown).serialize }
+      end
+
+      def projections
+        options.fetch(:projections)
       end
     end
   end

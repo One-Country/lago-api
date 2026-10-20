@@ -22,11 +22,15 @@ module Clickhouse
     belongs_to :user, optional: true
     belongs_to :api_key, optional: true
 
-    RESOURCE_TYPES_WITH_DISCARDED = %w[BillableMetric Plan Customer BillingEntity Coupon].freeze
+    RESOURCE_TYPES_WITH_DISCARDED = %w[
+      BillableMetric Plan CatalogPlan Customer BillingEntity Coupon ProductCategory Product ProductFilter RateCard
+      RateCardRate PlanRateCard ContractRateCard
+    ].freeze
 
     RESOURCE_TYPES = {
       billable_metric: "BillableMetric",
       plan: "Plan",
+      catalog_plan: "CatalogPlan",
       customer: "Customer",
       invoice: "Invoice",
       credit_note: "CreditNote",
@@ -36,7 +40,18 @@ module Clickhouse
       coupon: "Coupon",
       payment_receipt: "PaymentReceipt",
       payment_request: "PaymentRequest",
-      feature: "Entitlement::Feature"
+      feature: "Entitlement::Feature",
+      product_category: "ProductCategory",
+      product: "Product",
+      product_filter: "ProductFilter",
+      rate_card: "RateCard",
+      rate_card_rate: "RateCardRate",
+      plan_rate_card: "PlanRateCard",
+      contract_rate_card: "ContractRateCard",
+      contract: "Contract",
+      quote: "Quote",
+      order_form: "OrderForm",
+      order: "Order"
     }.freeze
 
     ACTIVITY_TYPES = {
@@ -59,6 +74,7 @@ module Clickhouse
       invoice_payment_status_updated: "invoice.payment_status_updated",
       invoice_payment_overdue: "invoice.payment_overdue",
       invoice_voided: "invoice.voided",
+      invoice_deleted: "invoice.deleted",
       invoice_regenerated: "invoice.regenerated",
       invoice_payment_failure: "invoice.payment_failure",
       payment_receipt_created: "payment_receipt.created",
@@ -89,7 +105,45 @@ module Clickhouse
       email_sent: "email.sent",
       feature_created: "feature.created",
       feature_deleted: "feature.deleted",
-      feature_updated: "feature.updated"
+      feature_updated: "feature.updated",
+      product_category_created: "product_category.created",
+      product_category_updated: "product_category.updated",
+      product_category_deleted: "product_category.deleted",
+      product_created: "product.created",
+      product_updated: "product.updated",
+      product_deleted: "product.deleted",
+      product_filter_created: "product_filter.created",
+      product_filter_updated: "product_filter.updated",
+      product_filter_deleted: "product_filter.deleted",
+      rate_card_created: "rate_card.created",
+      rate_card_updated: "rate_card.updated",
+      rate_card_deleted: "rate_card.deleted",
+      rate_card_rate_created: "rate_card_rate.created",
+      rate_card_rate_updated: "rate_card_rate.updated",
+      rate_card_rate_deleted: "rate_card_rate.deleted",
+      plan_rate_card_created: "plan_rate_card.created",
+      plan_rate_card_updated: "plan_rate_card.updated",
+      plan_rate_card_deleted: "plan_rate_card.deleted",
+      contract_rate_card_created: "contract_rate_card.created",
+      contract_rate_card_updated: "contract_rate_card.updated",
+      contract_rate_card_deleted: "contract_rate_card.deleted",
+      contract_created: "contract.created",
+      contract_updated: "contract.updated",
+      contract_started: "contract.started",
+      contract_terminated: "contract.terminated",
+      contract_canceled: "contract.canceled",
+      quote_created: "quote.created",
+      quote_updated: "quote.updated",
+      quote_approved: "quote.approved",
+      quote_voided: "quote.voided",
+      quote_version_created: "quote.version_created",
+      order_form_created: "order_form.created",
+      order_form_signed: "order_form.signed",
+      order_form_file_uploaded: "order_form.file_uploaded",
+      order_form_expired: "order_form.expired",
+      order_form_voided: "order_form.voided",
+      order_created: "order.created",
+      order_executed: "order.executed"
     }
 
     before_save :ensure_activity_id

@@ -14,7 +14,7 @@ class BillingEntity < ApplicationRecord
     "payment_receipt.created"
   ]
 
-  EINVOICING_COUNTRIES = %w[FR].map(&:upcase)
+  EINVOICING_COUNTRIES = %w[FR DE].map(&:upcase)
 
   SUBSCRIPTION_INVOICE_ISSUING_DATE_ANCHORS = {
     current_period_end: "current_period_end",
@@ -154,6 +154,10 @@ class BillingEntity < ApplicationRecord
       )
   end
 
+  def eligible_for_einvoicing?
+    einvoicing && EINVOICING_COUNTRIES.include?(country.try(:upcase))
+  end
+
   private
 
   def generate_document_number_prefix
@@ -206,6 +210,8 @@ end
 #  logo                                         :string
 #  name                                         :string           not null
 #  net_payment_term                             :integer          default(0), not null
+#  payment_term                                 :jsonb
+#  phone                                        :string
 #  state                                        :string
 #  subscription_invoice_issuing_date_adjustment :enum             default("align_with_finalization_date"), not null
 #  subscription_invoice_issuing_date_anchor     :enum             default("next_period_start"), not null

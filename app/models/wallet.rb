@@ -1,8 +1,10 @@
 # frozen_string_literal: true
 
 class Wallet < ApplicationRecord
+  include HasPurchaseOrderNumber
   include PaperTrailTraceable
   include Currencies
+  include ConnectionResolvable
 
   belongs_to :customer, -> { with_discarded }
   belongs_to :organization
@@ -14,9 +16,10 @@ class Wallet < ApplicationRecord
 
   has_many :wallet_targets
   has_many :billable_metrics, through: :wallet_targets
+  has_many :billing_object_connections, as: :owner, dependent: :destroy
 
   has_many :alerts, class_name: "UsageMonitoring::Alert"
-  has_many :triggered_alerts, class_name: "UsageMonitoring::TriggeredAlert"
+  has_many :triggered_alerts, -> { triggered }, class_name: "UsageMonitoring::TriggeredAlert"
 
   has_many :activity_logs,
     -> { order(logged_at: :desc) },
@@ -65,7 +68,7 @@ class Wallet < ApplicationRecord
   scope :ready_to_be_refreshed, -> { where(ready_to_be_refreshed: true) }
 
   def self.in_application_order
-    order(:priority, :created_at)
+    order(:priority, arel_table[:expiration_at].asc.nulls_last, :created_at)
   end
 
   def billing_entity
@@ -151,17 +154,20 @@ end
 #  lock_version                        :integer          default(0), not null
 #  name                                :string
 #  ongoing_balance_cents               :bigint           default(0), not null
+#  ongoing_billable_metric_amounts     :jsonb            not null
 #  ongoing_usage_balance_cents         :bigint           default(0), not null
 #  paid_top_up_max_amount_cents        :bigint
 #  paid_top_up_min_amount_cents        :bigint
 #  payment_method_type                 :enum             default("provider"), not null
 #  priority                            :integer          default(50), not null
+#  purchase_order_number               :string
 #  rate_amount                         :decimal(30, 5)   default(0.0), not null
 #  ready_to_be_refreshed               :boolean          default(FALSE), not null
 #  skip_invoice_custom_sections        :boolean          default(FALSE), not null
 #  status                              :integer          not null
 #  terminated_at                       :datetime
 #  traceable                           :boolean          default(FALSE), not null
+#  x402_enabled                        :boolean          default(FALSE), not null
 #  created_at                          :datetime         not null
 #  updated_at                          :datetime         not null
 #  billing_entity_id                   :uuid
@@ -178,6 +184,7 @@ end
 #  index_wallets_on_organization_id_and_customer_id  (organization_id,customer_id)
 #  index_wallets_on_payment_method_id                (payment_method_id)
 #  index_wallets_on_ready_to_be_refreshed            (ready_to_be_refreshed) WHERE ready_to_be_refreshed
+#  index_x402_enabled_wallets_on_customer_id         (customer_id) WHERE x402_enabled
 #
 # Foreign Keys
 #

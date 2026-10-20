@@ -5,6 +5,46 @@ require "rails_helper"
 RSpec.describe Integrations::Aggregator::Taxes::CreditNotes::Payloads::Avalara do
   subject(:payload) { described_class.new(integration:, customer:, integration_customer:, credit_note:).body }
 
+  before_all do
+    create_default(:organization)
+  end
+
+  describe "when a charge is credited over several fees" do
+    let(:integration) { create(:avalara_integration) }
+    let(:organization) { integration.organization }
+    let(:customer) { create(:customer, organization:) }
+    let(:integration_customer) { create(:avalara_customer, integration:, customer:) }
+    let(:invoice) { create(:invoice, customer:, organization:) }
+    let(:credit_note) { create(:credit_note, customer:, invoice:) }
+    let(:billable_metric) { create(:billable_metric, organization:) }
+    let(:charge) { create(:standard_charge, organization:, billable_metric:) }
+    let(:charge_fee) { create(:charge_fee, invoice:, charge:, units: 2, amount_cents: 115, precise_amount_cents: 115) }
+    let(:charge_fee_two) { create(:charge_fee, invoice:, charge:, units: 3, amount_cents: 115, precise_amount_cents: 115) }
+
+    before do
+      integration_customer
+      create(:credit_note_item, credit_note:, fee: charge_fee, amount_cents: 115, precise_amount_cents: 115, created_at: 2.seconds.ago)
+      create(:credit_note_item, credit_note:, fee: charge_fee_two, amount_cents: 115, precise_amount_cents: 115, created_at: 1.second.ago)
+
+      create(
+        :avalara_mapping,
+        integration:,
+        mappable_type: "BillableMetric",
+        mappable_id: billable_metric.id,
+        settings: {external_id: "ext_123"}
+      )
+    end
+
+    it "sends one line per credit note item, since Avalara rounds tax per line" do
+      expect(payload.first["fees"]).to eq(
+        [
+          {"item_id" => billable_metric.id, "item_code" => "ext_123", "unit" => 2, "amount" => "-1.15"},
+          {"item_id" => billable_metric.id, "item_code" => "ext_123", "unit" => 3, "amount" => "-1.15"}
+        ]
+      )
+    end
+  end
+
   describe "shipping address fallback" do
     let(:integration) { create(:avalara_integration) }
     let(:customer) do
@@ -144,6 +184,46 @@ RSpec.describe Integrations::Aggregator::Taxes::CreditNotes::Payloads::Avalara d
           ])
         }
       ]
+    end
+  end
+
+  context "with a Product fee" do
+    subject(:fee_payload) do
+      described_class.new(integration:, customer:, integration_customer:, credit_note:).body.sole["fees"].sole
+    end
+
+    let(:organization) { create(:organization) }
+    let(:billing_entity) { create(:billing_entity, organization:) }
+    let(:integration) { create(:avalara_integration, organization:) }
+    let(:customer) { create(:customer, organization:, billing_entity:) }
+    let(:integration_customer) { create(:avalara_customer, integration:, customer:) }
+    let(:invoice) { create(:invoice, organization:, billing_entity:, customer:) }
+    let(:subscription) { create(:subscription, organization:, customer:) }
+    let(:product) { create(:product, :fixed, organization:) }
+    let(:rate_card) { create(:rate_card, organization:, product:) }
+    let(:rate) { create(:rate_card_rate, organization:, rate_card:) }
+    let(:fee) { create(:product_fee, invoice:, subscription:, rate_card_rate: rate, units: 2, amount_cents: 250) }
+    let(:credit_note) { create(:credit_note, organization:, customer:, invoice:) }
+
+    before do
+      create(:credit_note_item, credit_note:, fee:, amount_cents: 190)
+      create(
+        :avalara_mapping,
+        integration:,
+        organization:,
+        billing_entity:,
+        mappable: product,
+        settings: {external_id: "product-code"}
+      )
+    end
+
+    it "uses the Product mapping" do
+      expect(fee_payload).to eq(
+        "item_id" => fee.item_id,
+        "item_code" => "product-code",
+        "unit" => 2.0,
+        "amount" => "-1.9"
+      )
     end
   end
 end

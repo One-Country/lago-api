@@ -4,12 +4,13 @@ module Invoices
   module Payments
     class GocardlessService < BaseService
       include Customers::PaymentProviderFinder
+      include TypedResults
 
-      def initialize(invoice = nil)
-        @invoice = invoice
+      RESULTS = {
+        update_payment_status: BaseResult[:payment, :invoice]
+      }.freeze
 
-        super
-      end
+      private
 
       def update_payment_status(provider_payment_id:, status:)
         payment = Payment.find_by(provider_payment_id:)
@@ -26,6 +27,7 @@ module Invoices
         payment.save!
 
         deliver_webhook if payable_payment_status.to_sym == :succeeded
+        Integrations::Aggregator::Payments::CreateJob.perform_later(payment:) if payment.should_sync_payment?
 
         update_invoice_payment_status(payment_status: payable_payment_status)
 
@@ -35,8 +37,6 @@ module Invoices
       rescue BaseService::FailedResult => e
         result.fail_with_error!(e)
       end
-
-      private
 
       attr_accessor :invoice
 

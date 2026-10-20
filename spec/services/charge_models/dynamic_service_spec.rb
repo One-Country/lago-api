@@ -5,9 +5,8 @@ require "rails_helper"
 RSpec.describe ChargeModels::DynamicService do
   subject(:apply_dynamic_service) do
     described_class.apply(
-      charge:,
+      pricing_structure: ChargeModels::PricingStructure.from_charge(charge),
       aggregation_result:,
-      properties: charge.properties,
       period_ratio: 1.0
     )
   end
@@ -17,7 +16,7 @@ RSpec.describe ChargeModels::DynamicService do
     aggregation_result.precise_total_amount_cents = precise_total_amount_cents
   end
 
-  let(:aggregation_result) { BaseService::Result.new }
+  let(:aggregation_result) { BillableMetrics::Aggregations::BaseService::Result.new }
 
   let(:charge) { create(:dynamic_charge) }
 
@@ -27,6 +26,15 @@ RSpec.describe ChargeModels::DynamicService do
   it "applies the model to the values" do
     expect(apply_dynamic_service.amount).to eq(0.402)
     expect(apply_dynamic_service.unit_amount).to eq(0.0201)
+  end
+
+  context "when precise total amount cents is an integer" do
+    let(:precise_total_amount_cents) { 4312 }
+
+    it "preserves the fractional currency amount" do
+      expect(apply_dynamic_service.amount).to eq(43.12)
+      expect(apply_dynamic_service.unit_amount).to eq(2.156)
+    end
   end
 
   context "when aggregation is zero" do

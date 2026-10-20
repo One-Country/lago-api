@@ -5,26 +5,18 @@ require "rails_helper"
 RSpec.describe ::BaseService do
   subject(:service) { described_class.new }
 
+  before_all do
+    create_default(:organization)
+    create_default(:customer)
+    create_default(:plan)
+  end
+
   it { is_expected.to be_a(AfterCommitEverywhere) }
   it { is_expected.to respond_to(:call) }
   it { is_expected.to respond_to(:call_async) }
   it { is_expected.to respond_to(:call_with_middlewares) }
 
   it { is_expected.to use_middleware(Middlewares::LogTracerMiddleware) }
-
-  context "with current_user" do
-    it "assigns the current_user to the result" do
-      result = described_class.new.send :result
-
-      expect(result).to be_a(::BaseService::Result)
-    end
-
-    it "does not assign the current_user to the result if it isn't a User" do
-      result = described_class.new([]).send :result
-
-      expect(result.user).to be_nil
-    end
-  end
 
   context "with activity_loggable" do
     let(:service_class) do
@@ -52,9 +44,9 @@ RSpec.describe ::BaseService do
         attr_reader :subscription
       end
     end
+    let(:activity_loggable_after_commit) { false }
 
     let(:subscription) { create(:subscription, name: "My Subscription") }
-    let(:activity_loggable_after_commit) { false }
 
     def test_service_with_activity_loggable(after_commit:, action_match_updated: false)
       expect(service_class).to use_middleware(Middlewares::ActivityLogMiddleware)

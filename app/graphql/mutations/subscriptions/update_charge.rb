@@ -3,6 +3,7 @@
 module Mutations
   module Subscriptions
     class UpdateCharge < BaseMutation
+      include ForbidsLegacyBilling
       include AuthenticableApiUser
       include RequiredOrganization
 
@@ -18,6 +19,9 @@ module Mutations
       def resolve(**args)
         subscription = current_organization.subscriptions.find_by(id: args[:subscription_id])
         charge = subscription&.plan&.charges&.find_by(code: args[:charge_code])
+
+        args[:properties] = args[:properties].to_h if args[:properties]
+        args[:filters] = args[:filters].map(&:to_h) if args[:filters]
 
         result = ::Subscriptions::UpdateOrOverrideChargeService.call(
           subscription:,

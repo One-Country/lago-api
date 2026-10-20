@@ -126,6 +126,23 @@ RSpec.describe WalletTransactions::VoidService do
       end
     end
 
+    context "with an inbound_wallet_transaction reference" do
+      let(:original_billing_entity) { create(:billing_entity, organization:) }
+      let(:new_billing_entity) { create(:billing_entity, organization:) }
+      let(:inbound_wallet_transaction) do
+        create(:wallet_transaction, wallet:, billing_entity: original_billing_entity)
+      end
+      let(:args) { {inbound_wallet_transaction:} }
+
+      before do
+        wallet.update!(billing_entity: new_billing_entity)
+      end
+
+      it "inherits the original transaction's billing entity, not the wallet's current one" do
+        expect(result.wallet_transaction.billing_entity_id).to eq(original_billing_entity.id)
+      end
+    end
+
     context "when wallet is traceable" do
       let(:wallet) do
         create(
@@ -165,6 +182,37 @@ RSpec.describe WalletTransactions::VoidService do
         )
 
         expect(inbound_transaction.reload.remaining_amount_cents).to eq(0)
+      end
+
+      context "when void_remaining is set" do
+        subject(:result) do
+          described_class.call(wallet:, inbound_wallet_transaction: inbound_transaction, void_remaining: true)
+        end
+
+        it "voids the targeted grant's whole remaining balance" do
+          expect(result.wallet_transaction.amount_cents).to eq(1000)
+          expect(inbound_transaction.reload.remaining_amount_cents).to eq(0)
+        end
+
+        it "sizes the void from a fresh read of the remaining, not a stale snapshot" do
+          service = described_class.new(wallet:, inbound_wallet_transaction: inbound_transaction, void_remaining: true)
+          # Mutate the DB behind the in-memory object to mimic consumption between validation and the lock.
+          WalletTransaction.where(id: inbound_transaction.id).update_all(remaining_amount_cents: 400) # rubocop:disable Rails/SkipsModelValidations
+          call_result = service.call
+
+          expect(call_result.wallet_transaction.amount_cents).to eq(400)
+          expect(inbound_transaction.reload.remaining_amount_cents).to eq(0)
+        end
+
+        context "when the grant has no remaining balance" do
+          before { WalletTransaction.where(id: inbound_transaction.id).update_all(remaining_amount_cents: 0) } # rubocop:disable Rails/SkipsModelValidations
+
+          it "succeeds without voiding anything" do
+            expect { result }.not_to change(WalletTransaction, :count)
+            expect(result).to be_success
+            expect(result.wallet_transaction).to be_nil
+          end
+        end
       end
 
       context "with multiple inbound transactions" do
@@ -678,8 +726,8 @@ RSpec.describe WalletTransactions::VoidService do
       context "when it fails to acquire the lock" do
         let(:lock_released_after) { 2.seconds }
 
-        it "raises a Customers::FailedToAcquireLock error" do
-          expect { subject }.to raise_error(Customers::FailedToAcquireLock)
+        it "raises a BaseLockService::FailedToAcquireLock error" do
+          expect { subject }.to raise_error(BaseLockService::FailedToAcquireLock)
         end
       end
 

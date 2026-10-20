@@ -1,10 +1,14 @@
 # frozen_string_literal: true
 
 class Subscription < ApplicationRecord
+  include BillingPeriodDateDiff
+  include HasPurchaseOrderNumber
   include PaperTrailTraceable
   include RansackUuidSearch
+  include Terminatable
+  include ConnectionResolvable
 
-  self.ignored_columns += %w[incompleted_at]
+  self.ignored_columns += %w[incompleted_at cancelation_reason]
 
   belongs_to :customer, -> { with_discarded }
   belongs_to :plan, -> { with_discarded }
@@ -18,6 +22,7 @@ class Subscription < ApplicationRecord
   has_many :invoice_subscriptions
   has_many :invoices, through: :invoice_subscriptions
   has_many :integration_resources, as: :syncable
+  has_many :billing_object_connections, as: :owner, dependent: :destroy
   has_many :fees
   has_many :daily_usages
   has_many :usage_thresholds
@@ -25,6 +30,7 @@ class Subscription < ApplicationRecord
   has_many :entitlement_removals, class_name: "Entitlement::SubscriptionFeatureRemoval"
   has_many :fixed_charges, -> { kept }, through: :plan
   has_many :fixed_charge_events
+  has_many :fixed_charge_units_overrides, class_name: "Subscription::FixedChargeUnitsOverride"
   has_many :add_ons, through: :fixed_charges
   has_many :activity_logs,
     -> { order(logged_at: :desc) },
@@ -47,7 +53,7 @@ class Subscription < ApplicationRecord
   delegate :amount_currency, to: :plan, prefix: true
 
   validates :external_id, :billing_time, presence: true
-  validate :validate_external_id, on: :create
+  validate :validate_external_id, on: [:create, :update], if: -> { status_changed? }
 
   STATUSES = [
     :pending,
@@ -57,7 +63,7 @@ class Subscription < ApplicationRecord
     :incomplete
   ].freeze
 
-  CANCELATION_REASONS = {payment_failed: "payment_failed", timeout: "timeout"}.freeze
+  CANCELLATION_REASONS = {payment_failed: "payment_failed", timeout: "timeout", manual: "manual"}.freeze
 
   BILLING_TIME = %i[
     calendar
@@ -71,13 +77,19 @@ class Subscription < ApplicationRecord
   enum :billing_time, BILLING_TIME
   enum :on_termination_credit_note, ON_TERMINATION_CREDIT_NOTES, prefix: true
   enum :on_termination_invoice, ON_TERMINATION_INVOICES, prefix: true
-  enum :cancelation_reason, CANCELATION_REASONS
+  enum :cancellation_reason, CANCELLATION_REASONS
 
   validates :on_termination_credit_note, absence: true, if: -> { plan&.pay_in_arrears? }
   validates :started_at, presence: true, if: -> { incomplete? }
 
   scope :starting_in_the_future, -> { pending.where(previous_subscription: nil) }
   scope :expirable, -> { incomplete.joins(:activation_rules).merge(Subscription::ActivationRule.expirable) }
+  scope :without_fixed_charge_units_override_for, ->(fixed_charge) {
+    overrides = Subscription::FixedChargeUnitsOverride
+      .where(fixed_charge:)
+      .where("subscription_fixed_charge_units_overrides.subscription_id = subscriptions.id")
+    where.not(overrides.arel.exists)
+  }
 
   # NOTE: SQL query to get subscription_at into customer timezone
   def self.subscription_at_in_timezone_sql
@@ -158,6 +170,12 @@ class Subscription < ApplicationRecord
     plan.yearly_amount_cents > next_subscription.plan.yearly_amount_cents
   end
 
+  # The anchor a rate card inherits when it is created without one: the
+  # subscription's explicit anchor, else the day the subscription started.
+  def effective_billing_anchor_date
+    billing_anchor_date || (started_at || subscription_at)&.to_date
+  end
+
   def trial_end_date
     return unless plan.has_trial?
 
@@ -179,6 +197,12 @@ class Subscription < ApplicationRecord
 
   def started_in_past?
     started_at.to_date < created_at.to_date
+  end
+
+  # Falls back to started_at when the subscription has not started yet, so the billing period is
+  # computed from its first period rather than the period around Time.current.
+  def billing_reference_time
+    [Time.current, started_at].compact.max
   end
 
   def initial_started_at
@@ -209,6 +233,10 @@ class Subscription < ApplicationRecord
 
   def downgrade_plan_date
     return unless next_subscription
+
+    if next_subscription.active? && downgraded?
+      return next_subscription.started_at&.to_date
+    end
     return unless next_subscription.pending?
 
     ::Subscriptions::DatesService.new_instance(self, Time.current)
@@ -223,35 +251,8 @@ class Subscription < ApplicationRecord
     name.presence || plan.invoice_name
   end
 
-  # When upgrade, we want to bill one day less since date of the upgrade will be
-  # included in the first invoice for the new plan
-  def date_diff_with_timezone(from_datetime, to_datetime)
-    number_od_days = Utils::Datetime.date_diff_with_timezone(
-      from_datetime,
-      to_datetime,
-      customer.applicable_timezone
-    )
-
-    return number_od_days unless terminated? && upgraded?
-
-    number_od_days -= 1
-
-    number_od_days.negative? ? 0 : number_od_days
-  end
-
   def should_sync_hubspot_subscription?
     customer.integration_customers.hubspot_kind.any? { |c| c.integration.sync_subscriptions }
-  end
-
-  def terminated_at?(timestamp)
-    return false unless terminated?
-    return false if terminated_at.nil? || timestamp.nil?
-
-    # TODO: should be cleaned up to only use Time
-    timestamp = timestamp.to_time if [Date, DateTime, String].include?(timestamp.class)
-    timestamp = Time.zone.at(timestamp) if timestamp.is_a?(Integer)
-
-    terminated_at.round <= timestamp.round
   end
 
   # TODO: Apply this method in CreateInvoiceSubscriptionService
@@ -317,37 +318,43 @@ end
 # Table name: subscriptions
 # Database name: primary
 #
-#  id                            :uuid             not null, primary key
-#  activated_at                  :datetime
-#  billing_time                  :integer          default("calendar"), not null
-#  cancelation_reason            :enum
-#  canceled_at                   :datetime
-#  consolidate_invoice           :boolean          default(TRUE), not null
-#  ending_at                     :datetime
-#  last_received_event_on        :date
-#  name                          :string
-#  on_termination_credit_note    :enum
-#  on_termination_invoice        :enum             default("generate"), not null
-#  payment_method_type           :enum             default("provider"), not null
-#  progressive_billing_disabled  :boolean          default(FALSE), not null
-#  skip_invoice_custom_sections  :boolean          default(FALSE), not null
-#  started_at                    :datetime
-#  status                        :integer          not null
-#  subscription_at               :datetime
-#  terminated_at                 :datetime
-#  trial_ended_at                :datetime
-#  created_at                    :datetime         not null
-#  updated_at                    :datetime         not null
-#  billing_entity_id             :uuid
-#  customer_id                   :uuid             not null
-#  external_id                   :string           not null
-#  organization_id               :uuid             not null
-#  payment_method_id             :uuid
-#  plan_id                       :uuid             not null
-#  previous_subscription_id      :uuid
+#  id                           :uuid             not null, primary key
+#  activated_at                 :datetime
+#  billing_anchor_date          :date
+#  billing_time                 :integer          default("calendar"), not null
+#  canceled_at                  :datetime
+#  cancellation_reason          :enum
+#  consolidate_invoice          :boolean          default(TRUE), not null
+#  ending_at                    :datetime
+#  last_received_event_on       :date
+#  name                         :string
+#  on_termination_credit_note   :enum
+#  on_termination_invoice       :enum             default("generate"), not null
+#  payment_method_type          :enum             default("provider"), not null
+#  progressive_billing_disabled :boolean          default(FALSE), not null
+#  purchase_order_number        :string
+#  skip_daily_usage             :boolean          default(FALSE), not null
+#  skip_invoice_custom_sections :boolean          default(FALSE), not null
+#  started_at                   :datetime
+#  status                       :integer          not null
+#  subscription_at              :datetime
+#  terminated_at                :datetime
+#  trial_ended_at               :datetime
+#  created_at                   :datetime         not null
+#  updated_at                   :datetime         not null
+#  billing_entity_id            :uuid
+#  customer_id                  :uuid             not null
+#  external_id                  :string           not null
+#  organization_id              :uuid             not null
+#  payment_method_id            :uuid
+#  plan_id                      :uuid             not null
+#  previous_subscription_id     :uuid
 #
 # Indexes
 #
+#  idx_on_organization_id_external_id_gin_trgm_ops_fb8058a497  (organization_id,external_id) USING gin
+#  idx_on_organization_id_subscription_at_created_at_id        (organization_id,subscription_at DESC NULLS LAST,created_at DESC,id)
+#  index_pending_active_subscriptions_on_plan_id_and_status    (plan_id,status) WHERE (status = ANY (ARRAY[0, 1]))
 #  index_subscriptions_on_billing_entity_id                    (billing_entity_id)
 #  index_subscriptions_on_customer_id                          (customer_id)
 #  index_subscriptions_on_ending_at_active                     (ending_at) WHERE ((status = 1) AND (ending_at IS NOT NULL))
@@ -355,6 +362,7 @@ end
 #  index_subscriptions_on_last_received_event_on               (last_received_event_on)
 #  index_subscriptions_on_last_received_event_on_null          (id) WHERE (last_received_event_on IS NULL)
 #  index_subscriptions_on_organization_id                      (organization_id)
+#  index_subscriptions_on_organization_id_name_gin_trgm_ops    (organization_id,name) USING gin
 #  index_subscriptions_on_payment_method_id                    (payment_method_id)
 #  index_subscriptions_on_plan_id                              (plan_id)
 #  index_subscriptions_on_previous_subscription_id_and_status  (previous_subscription_id,status)

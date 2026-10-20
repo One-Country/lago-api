@@ -5,10 +5,11 @@ require "rails_helper"
 RSpec.describe Charges::OverrideService do
   subject(:override_service) { described_class.new(charge:, params:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization, refind: true) { create(:organization) }
 
   describe "#call" do
-    let(:billable_metric) { create(:billable_metric, organization:) }
+    let_it_be(:billable_metric, refind: true) { create(:billable_metric, organization:) }
+    let_it_be(:plan, refind: true) { create(:plan, organization:) }
     let(:tax) { create(:tax, organization:) }
 
     let(:charge) do
@@ -19,7 +20,7 @@ RSpec.describe Charges::OverrideService do
         properties: {amount: "300"}
       )
     end
-    let(:plan) { create(:plan, organization:) }
+
     let(:params) do
       {
         id: charge.id,
@@ -63,6 +64,25 @@ RSpec.describe Charges::OverrideService do
           properties: {"amount" => "200"}
         )
         expect(new_charge.taxes).to contain_exactly(tax)
+      end
+
+      context "when the plan is passed in params" do
+        let(:params) do
+          {
+            id: charge.id,
+            plan:,
+            min_amount_cents: 1000,
+            properties: {amount: "200"}
+          }
+        end
+
+        it "creates the charge on the given plan" do
+          result = override_service.call
+
+          expect(result).to be_success
+          expect(result.charge.plan).to eq(plan)
+          expect(result.charge.organization).to eq(plan.organization)
+        end
       end
 
       context "with charge filters" do
@@ -180,6 +200,41 @@ RSpec.describe Charges::OverrideService do
 
         it "does not change parent charge" do
           expect { override_service.call }.not_to change { charge.reload.attributes }
+        end
+      end
+    end
+
+    # The code is the link between a plan's filter and the copy on an override: the copy must
+    # carry the same one, never a freshly generated one.
+    context "with filter codes", :premium do
+      let(:params) { {id: charge.id, plan:, properties: {amount: "200"}} }
+
+      let(:bm_filter) do
+        create(:billable_metric_filter, billable_metric:, key: "model", values: %w[a b])
+      end
+
+      before do
+        %w[a b].each do |value|
+          filter = create(:charge_filter, charge:)
+          create(:charge_filter_value, charge_filter: filter, billable_metric_filter: bm_filter, values: [value])
+          filter.assign_code!
+        end
+      end
+
+      it "copies the parent codes onto the override" do
+        result = override_service.call
+
+        expect(result).to be_success
+        expect(result.charge.filters.map(&:code).sort).to eq(charge.filters.reload.map(&:code).sort)
+      end
+
+      it "gives the copies the code of the filter they came from" do
+        result = override_service.call
+
+        parent_codes = charge.filters.reload.to_h { |f| [f.to_h, f.code] }
+
+        result.charge.filters.each do |child_filter|
+          expect(child_filter.code).to eq(parent_codes[child_filter.to_h])
         end
       end
     end

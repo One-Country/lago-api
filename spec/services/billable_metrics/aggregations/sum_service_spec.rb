@@ -5,19 +5,34 @@ require "rails_helper"
 RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
   subject(:sum_service) do
     described_class.new(
-      event_store_class:,
-      charge:,
-      subscription:,
-      boundaries: {
-        from_datetime:,
-        to_datetime:
-      },
+      event_store:,
+      metered_item:,
+      billing_context:,
+      boundaries:,
       filters:,
       bypass_aggregation:
     )
   end
 
   let(:event_store_class) { Events::Stores::PostgresStore }
+  let(:metered_item) do
+    Fees::ChargeService::MeteredItem.from_charge(
+      charge:,
+      boundaries: BillingPeriodBoundaries.new(
+        from_datetime:,
+        to_datetime:,
+        charges_from_datetime: from_datetime,
+        charges_to_datetime: to_datetime,
+        charges_duration: (to_datetime.to_date - from_datetime.to_date).to_i + 1,
+        timestamp: to_datetime
+      )
+    )
+  end
+  let(:boundaries) { {from_datetime:, to_datetime:} }
+  let(:billing_context) { Billing::Context.from(subscription:) }
+  let(:event_store) do
+    event_store_class.new(code: billable_metric.code, billing_context:, boundaries:, filters:)
+  end
   let(:bypass_aggregation) { false }
   let(:filters) do
     {event: pay_in_advance_event, grouped_by:, presentation_by:, charge_filter:, matching_filters:, ignored_filters:}
@@ -109,6 +124,48 @@ RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
       expect(result.pay_in_advance_aggregation).to be_zero
       expect(result.count).to eq(6)
       expect(result.options).to eq({running_total: [2.5, 5]})
+    end
+  end
+
+  context "when a precomputed aggregation is passed" do
+    let(:precomputed_aggregation) { Events::Stores::BaseStore::AggregationResult.new(value: 999, events_count: 7) }
+
+    it "uses it instead of querying the event store" do
+      result = sum_service.aggregate(options: {precomputed_aggregation:})
+
+      expect(result.aggregation).to eq(999)
+      expect(result.count).to eq(7)
+    end
+  end
+
+  context "when precomputed grouped aggregations are passed" do
+    let(:grouped_by) { %w[region] }
+    let(:precomputed_grouped_aggregations) do
+      [
+        Events::Stores::BaseStore::GroupedAggregationResult.new(groups: {"region" => "us"}, value: 100, events_count: 3),
+        Events::Stores::BaseStore::GroupedAggregationResult.new(groups: {"region" => "eu"}, value: 50, events_count: 2)
+      ]
+    end
+
+    it "builds the group results from them" do
+      result = sum_service.aggregate(options: {precomputed_grouped_aggregations:})
+
+      expect(result.aggregations.map { |agg| [agg.grouped_by, agg.aggregation, agg.count] }).to match_array(
+        [
+          [{"region" => "us"}, 100, 3],
+          [{"region" => "eu"}, 50, 2]
+        ]
+      )
+    end
+
+    context "when they are blank" do
+      let(:precomputed_grouped_aggregations) { [] }
+
+      it "returns empty results" do
+        result = sum_service.aggregate(options: {precomputed_grouped_aggregations:})
+
+        expect(result.aggregations.map(&:aggregation)).to eq([0])
+      end
     end
   end
 
@@ -225,7 +282,7 @@ RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
           code: billable_metric.code,
           customer:,
           subscription:,
-          timestamp: to_datetime - 1.day,
+          timestamp: to_datetime - 12.hours,
           properties: {
             total_count: 8,
             region: "europe"
@@ -466,7 +523,7 @@ RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
         code: billable_metric.code,
         customer:,
         subscription:,
-        timestamp: to_datetime - 1.day,
+        timestamp: to_datetime - 12.hours,
         properties: {
           total_count: 8,
           region: "europe"
@@ -534,7 +591,7 @@ RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
         code: billable_metric.code,
         customer:,
         subscription:,
-        timestamp: to_datetime - 1.day,
+        timestamp: to_datetime - 12.hours,
         properties: {
           total_count: 8,
           region: "europe"
@@ -622,6 +679,19 @@ RSpec.describe BillableMetrics::Aggregations::SumService, transaction: false do
       result = sum_service.aggregate
 
       expect(result.pay_in_advance_aggregation).to eq(10)
+    end
+
+    context "with presentation group keys" do
+      let(:presentation_by) { ["cloud", "region"] }
+      let(:properties) { {"total_count" => 10, "cloud" => "aws", "region" => "eu"} }
+
+      it "assigns pay_in_advance_breakdowns based on the pay_in_advance event" do
+        result = sum_service.aggregate
+
+        expect(result.pay_in_advance_breakdowns).to eq([
+          {groups: {"cloud" => "aws", "region" => "eu"}, value: 10}
+        ])
+      end
     end
 
     context "when current period aggregation is greater than period maximum" do

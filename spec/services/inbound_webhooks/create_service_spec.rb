@@ -14,13 +14,13 @@ RSpec.describe InboundWebhooks::CreateService do
     )
   end
 
-  let(:organization) { create :organization }
+  let_it_be(:organization) { create :organization }
   let(:code) { "stripe_1" }
   let(:webhook_source) { "stripe" }
   let(:signature) { "signature" }
   let(:payload) { event.merge(code:).to_json }
   let(:event_type) { "payment_intent.successful" }
-  let(:validation_payload_result) { BaseService::Result.new }
+  let(:validation_payload_result) { InboundWebhooks::ValidatePayloadService::Result.new }
 
   let(:event) do
     JSON.parse(get_stripe_fixtures("webhooks/payment_intent_succeeded.json"))
@@ -67,7 +67,7 @@ RSpec.describe InboundWebhooks::CreateService do
 
   context "when payload validation fails" do
     let(:validation_payload_result) do
-      BaseService::Result.new.service_failure!(
+      InboundWebhooks::ValidatePayloadService::Result.new.service_failure!(
         code: "webhook_error", message: "Invalid signature"
       )
     end

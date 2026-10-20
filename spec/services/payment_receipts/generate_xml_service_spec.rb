@@ -4,9 +4,6 @@ require "rails_helper"
 
 RSpec.describe PaymentReceipts::GenerateXmlService do
   let(:context) { "graphql" }
-  let(:organization) { create(:organization, name: "LAGO") }
-  let(:billing_entity) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
-  let(:customer) { create(:customer, organization:) }
   let(:invoice) { create(:invoice, total_amount_cents: 1000, number: "INV-24680-OIC-E") }
   let(:payment) do
     create(:payment,
@@ -20,11 +17,15 @@ RSpec.describe PaymentReceipts::GenerateXmlService do
   end
   let(:payment_receipt) { create(:payment_receipt, payment:, organization:, billing_entity:) }
   let(:status) { :finalized }
-  let(:einvoicing) { true }
   let(:blank_xml_path) { Rails.root.join("spec/fixtures/blank.xml") }
   let(:fake_xml) { "<xml>content</xml>" }
-  let(:create_xml_result) { BaseService::Result.new.tap { |result| result.xml = fake_xml } }
+  let(:create_xml_result) { EInvoices::Invoices::Ubl::CreateService::Result.new.tap { |result| result.xml = fake_xml } }
   let(:xml_service) { EInvoices::Invoices::Ubl::CreateService }
+
+  let_it_be(:organization, refind: true) { create_default(:organization, name: "LAGO") }
+  let_it_be(:einvoicing) { true }
+  let_it_be(:billing_entity, refind: true) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
 
   before do
     payment
@@ -87,7 +88,7 @@ RSpec.describe PaymentReceipts::GenerateXmlService do
         it "results in error" do
           result = described_class.call(payment_receipt:, context:)
 
-          expect(result.success).to be_falsey
+          expect(result).to be_failure
           expect(result.error.error_code).to eq("payment_receipt_not_found")
         end
       end
@@ -115,6 +116,7 @@ RSpec.describe PaymentReceipts::GenerateXmlService do
 
       context "when einvoicing is disabled" do
         let(:einvoicing) { false }
+        let(:billing_entity) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
 
         it_behaves_like "dont generate"
       end

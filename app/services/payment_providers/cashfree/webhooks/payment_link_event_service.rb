@@ -15,15 +15,17 @@ module PaymentProviders
           return result unless LINK_STATUS_ACTIONS.include?(link_status)
           return result if provider_payment_id.nil?
 
-          payment_service_class.new.update_payment_status(
+          payment_service_class.call!(
+            :update_payment_status,
             organization_id: organization.id,
             status: link_status,
+            amount_cents: link_amount_paid_cents,
             cashfree_payment: PaymentProviders::CashfreeProvider::CashfreePayment.new(
               id: provider_payment_id,
               status: link_status,
               metadata: event.dig("data", "link_notes").to_h.symbolize_keys || {}
             )
-          ).raise_if_error!
+          )
         end
 
         private
@@ -44,6 +46,14 @@ module PaymentProviders
 
         def payable_type
           @payable_type ||= event.dig("data", "link_notes", "lago_payable_type")
+        end
+
+        def link_amount_paid_cents
+          raw = event.dig("data", "link_amount_paid")
+          currency = event.dig("data", "link_currency")
+          return nil if raw.nil? || currency.nil?
+
+          Money.from_amount(raw.to_d, currency).cents
         end
       end
     end

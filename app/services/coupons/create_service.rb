@@ -2,6 +2,8 @@
 
 module Coupons
   class CreateService < BaseService
+    Result = BaseResult[:coupon]
+
     def initialize(args)
       @args = args
       super
@@ -61,6 +63,7 @@ module Coupons
       end
 
       result.coupon = coupon
+      SendWebhookJob.perform_after_commit("coupon.created", coupon)
       result
     rescue ActiveRecord::RecordInvalid => e
       result.record_validation_failure!(record: e.record)

@@ -2,6 +2,8 @@
 
 module PaymentProviders
   class MoneyhashService < BaseService
+    Result = BaseResult[:moneyhash_provider, :signature_key]
+
     def create_or_update(**args)
       payment_provider_result = PaymentProviders::FindService.call(
         organization_id: args[:organization].id,
@@ -20,7 +22,7 @@ module PaymentProviders
       end
 
       old_code = moneyhash_provider.code
-      moneyhash_provider.api_key = args[:api_key] if args.key?(:api_key)
+      moneyhash_provider.api_key = args[:api_key] if args.key?(:api_key) && !Types::ObfuscatedStringType.obfuscated?(args[:api_key])
       moneyhash_provider.code = args[:code] if args.key?(:code)
       moneyhash_provider.name = args[:name] if args.key?(:name)
       moneyhash_provider.flow_id = args[:flow_id] if args.key?(:flow_id)

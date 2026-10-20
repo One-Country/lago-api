@@ -5,9 +5,9 @@ require "rails_helper"
 RSpec.describe Plans::UpdateService do
   subject(:plans_service) { described_class.new(plan:, params: update_args) }
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let(:membership) { create_default(:membership) }
+  let(:plan) { create_default(:plan, organization:) }
   let(:plan_name) { "Updated plan name" }
   let(:plan_invoice_display_name) { "Updated plan invoice display name" }
   let(:sum_billable_metric) { create(:sum_billable_metric, organization:, recurring: true) }
@@ -152,6 +152,20 @@ RSpec.describe Plans::UpdateService do
       applied_tax
     end
 
+    context "when the organization uses the product catalog" do
+      before { organization.enable_feature_flag!(:product_catalog) }
+
+      it "rejects legacy pricing fields and accepts the others" do
+        result = described_class.call(plan:, params: {amount_cents: 100})
+        expect(result).to be_failure
+        expect(result.error.messages[:amount_cents]).to eq(["legacy_billing_disabled"])
+
+        result = described_class.call(plan:, params: {name: "Renamed"})
+        expect(result).to be_success
+        expect(plan.reload.name).to eq("Renamed")
+      end
+    end
+
     it "updates a plan" do
       result = plans_service.call
 
@@ -170,12 +184,75 @@ RSpec.describe Plans::UpdateService do
       expect(plan.fixed_charges.order(created_at: :asc).second.invoice_display_name).to eq("fixed_charge2")
     end
 
-    it "marks invoices as ready to be refreshed" do
-      subscription = create(:subscription, organization:, plan:)
-      invoice = create(:invoice, :draft)
-      create(:invoice_subscription, invoice:, subscription:)
+    context "when send_webhook is false" do
+      it "does not enqueue the plan.updated webhook but still produces the activity log" do
+        described_class.call(plan:, params: update_args, send_webhook: false)
 
-      expect { plans_service.call }.to change { invoice.reload.ready_to_be_refreshed }.to(true)
+        expect(SendWebhookJob).not_to have_been_enqueued.with("plan.updated", plan)
+        expect(Utils::ActivityLog).to have_produced("plan.updated").after_commit.with(plan)
+      end
+    end
+
+    context "when marking draft invoices for refresh" do
+      let(:update_args) { {name: plan_name} }
+      let(:customer) { create(:customer, organization:) }
+      let(:subscription) { create(:subscription, organization:, plan:, customer:) }
+      let(:invoice) { create(:invoice, :draft, customer:) }
+
+      before do
+        create(:invoice_subscription, organization:, invoice:, subscription:)
+      end
+
+      it "marks the plan's draft invoices as ready to be refreshed" do
+        expect { plans_service.call }.to change { invoice.reload.ready_to_be_refreshed }.to(true)
+      end
+
+      it "marks consolidated invoices shared with other subscriptions" do
+        other_plan = create(:plan, organization:)
+        other_subscription = create(:subscription, organization:, customer:, plan: other_plan)
+        same_plan_subscription = create(:subscription, organization:, customer:, plan:)
+        create(:invoice_subscription, organization:, invoice:, subscription: other_subscription)
+        create(:invoice_subscription, organization:, invoice:, subscription: same_plan_subscription)
+
+        expect { plans_service.call }.to change { invoice.reload.ready_to_be_refreshed }.to(true)
+      end
+
+      context "when the subscription is terminated" do
+        let(:subscription) { create(:subscription, :terminated, organization:, plan:, customer:) }
+
+        it "still marks its draft invoices as ready to be refreshed" do
+          expect { plans_service.call }.to change { invoice.reload.ready_to_be_refreshed }.to(true)
+        end
+      end
+
+      context "when the invoice is finalized" do
+        let(:invoice) { create(:invoice, customer:, status: :finalized) }
+
+        it "updates the plan without marking the invoice for refresh" do
+          expect(plans_service.call).to be_success
+          expect(invoice.reload.ready_to_be_refreshed).to be(false)
+        end
+      end
+
+      context "when the invoice belongs to another plan" do
+        let(:other_plan) { create(:plan, organization:) }
+        let(:subscription) { create(:subscription, organization:, customer:, plan: other_plan) }
+
+        it "does not mark the invoice for refresh" do
+          expect(plans_service.call).to be_success
+          expect(invoice.reload.ready_to_be_refreshed).to be(false)
+        end
+      end
+
+      context "when an invoice from another organization is linked to the subscription" do
+        let(:other_organization) { create(:organization) }
+        let(:invoice) { create(:invoice, :draft, organization: other_organization, customer: create(:customer, organization: other_organization)) }
+
+        it "does not mark the other organization's invoice for refresh" do
+          expect(plans_service.call).to be_success
+          expect(invoice.reload.ready_to_be_refreshed).to be(false)
+        end
+      end
     end
 
     context "with activity logs" do
@@ -476,7 +553,7 @@ RSpec.describe Plans::UpdateService do
             amount_currency: "EUR"
           }
         end
-        let(:plan_upgrade_result) { BaseService::Result.new }
+        let(:plan_upgrade_result) { Subscriptions::PlanUpgradeService::Result.new }
 
         before do
           allow(Subscriptions::PlanUpgradeService)
@@ -489,7 +566,11 @@ RSpec.describe Plans::UpdateService do
         it "upgrades subscription plan" do
           plans_service.call
 
-          expect(Subscriptions::PlanUpgradeService).to have_received(:call)
+          expect(Subscriptions::PlanUpgradeService).to have_received(:call).with(
+            current_subscription: subscription,
+            plan: plan,
+            params: {name: pending_subscription.name}
+          )
         end
 
         it "updates the plan" do
@@ -497,6 +578,25 @@ RSpec.describe Plans::UpdateService do
 
           expect(result.plan.name).to eq("Updated plan name")
           expect(result.plan.amount_cents).to eq(200)
+        end
+
+        context "when the pending subscription has activation rules" do
+          before do
+            create(:subscription_activation_rule, subscription: pending_subscription, organization:, timeout_hours: 24)
+          end
+
+          it "forwards the activation_rules to the plan upgrade" do
+            plans_service.call
+
+            expect(Subscriptions::PlanUpgradeService).to have_received(:call).with(
+              current_subscription: subscription,
+              plan: plan,
+              params: {
+                name: pending_subscription.name,
+                activation_rules: [{type: "payment", timeout_hours: 24}]
+              }
+            )
+          end
         end
 
         context "when pending subscription does not have a previous one" do
@@ -513,7 +613,7 @@ RSpec.describe Plans::UpdateService do
 
         context "when subscription upgrade fails" do
           let(:plan_upgrade_result) do
-            BaseService::Result.new.validation_failure!(
+            Subscriptions::PlanUpgradeService::Result.new.validation_failure!(
               errors: {billing_time: ["value_is_invalid"]}
             )
           end
@@ -678,6 +778,7 @@ RSpec.describe Plans::UpdateService do
     end
 
     context "with metrics from other organization" do
+      let(:organization) { create(:organization) }
       let(:billable_metric) { create(:billable_metric) }
 
       it "returns an error" do
@@ -1499,9 +1600,9 @@ RSpec.describe Plans::UpdateService do
 
           before { subscription }
 
-          it "does not enqueue a Invoices::CreatePayInAdvanceFixedChargesJob for active subscriptions" do
+          it "does not enqueue a Invoices::CreateAllPayInAdvanceFixedChargesJob" do
             expect { plans_service.call }
-              .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+              .not_to have_enqueued_job(Invoices::CreateAllPayInAdvanceFixedChargesJob)
           end
         end
 
@@ -1533,10 +1634,22 @@ RSpec.describe Plans::UpdateService do
 
             before { subscription }
 
-            it "enqueues a Invoices::CreatePayInAdvanceFixedChargesJob for active subscriptions" do
+            it "enqueues a single Invoices::CreateAllPayInAdvanceFixedChargesJob for the plan" do
               freeze_time do
                 expect { plans_service.call }
-                  .to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+                  .to have_enqueued_job(Invoices::CreateAllPayInAdvanceFixedChargesJob)
+                  .with(plan, Time.current.to_i)
+              end
+            end
+
+            it "enqueues a Invoices::CreatePayInAdvanceFixedChargesJob for active subscriptions" do
+              freeze_time do
+                perform_enqueued_jobs(only: Invoices::CreateAllPayInAdvanceFixedChargesJob) do
+                  plans_service.call
+                end
+
+                expect(Invoices::CreatePayInAdvanceFixedChargesJob)
+                  .to have_been_enqueued
                   .with(subscription, Time.current.to_i)
               end
             end
@@ -1548,8 +1661,11 @@ RSpec.describe Plans::UpdateService do
             before { subscription }
 
             it "does not enqueue a Invoices::CreatePayInAdvanceFixedChargesJob" do
-              expect { plans_service.call }
-                .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+              perform_enqueued_jobs(only: Invoices::CreateAllPayInAdvanceFixedChargesJob) do
+                plans_service.call
+              end
+
+              expect(Invoices::CreatePayInAdvanceFixedChargesJob).not_to have_been_enqueued
             end
           end
         end

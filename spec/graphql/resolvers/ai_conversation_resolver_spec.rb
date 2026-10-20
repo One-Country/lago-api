@@ -3,7 +3,28 @@
 require "rails_helper"
 
 RSpec.describe Resolvers::AiConversationResolver do
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
   let(:required_permission) { "ai_conversations:view" }
+  let(:organization) { membership.organization }
+  let(:ai_conversation) { create(:ai_conversation, organization:, mistral_conversation_id: "conv_123") }
+  let(:fetch_messages_service) { instance_double(AiConversations::FetchMessagesService) }
+  let(:service_result) do
+    result = AiConversations::FetchMessagesService::Result.new
+    result.messages = [
+      {
+        "content" => "Hello",
+        "created_at" => "2024-01-01T12:00:00Z",
+        "type" => "message.output"
+      },
+      {
+        "content" => "Hi there!",
+        "created_at" => "2024-01-01T12:01:00Z",
+        "type" => "message.output"
+      }
+    ]
+    result
+  end
   let(:query) do
     <<~GQL
       query($id: ID!) {
@@ -23,26 +44,7 @@ RSpec.describe Resolvers::AiConversationResolver do
     GQL
   end
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:ai_conversation) { create(:ai_conversation, organization:, mistral_conversation_id: "conv_123") }
-  let(:fetch_messages_service) { instance_double(AiConversations::FetchMessagesService) }
-  let(:service_result) do
-    result = BaseService::Result.new
-    result.messages = [
-      {
-        "content" => "Hello",
-        "created_at" => "2024-01-01T12:00:00Z",
-        "type" => "message.output"
-      },
-      {
-        "content" => "Hi there!",
-        "created_at" => "2024-01-01T12:01:00Z",
-        "type" => "message.output"
-      }
-    ]
-    result
-  end
+  let_it_be(:membership) { create_default(:membership) }
 
   before do
     ai_conversation
@@ -122,7 +124,7 @@ RSpec.describe Resolvers::AiConversationResolver do
 
     context "when fetch messages service fails" do
       let(:failed_result) do
-        result = BaseService::Result.new
+        result = AiConversations::FetchMessagesService::Result.new
         result.service_failure!(code: "mistral_api_error", message: "API error")
         result
       end

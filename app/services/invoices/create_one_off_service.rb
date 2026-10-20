@@ -2,7 +2,9 @@
 
 module Invoices
   class CreateOneOffService < BaseService
-    def initialize(customer:, currency:, fees:, timestamp:, skip_psp: false, voided_invoice_id: nil, payment_method_params: nil, invoice_custom_section: {}, billing_entity_id: nil, billing_entity_code: nil)
+    Result = BaseResult[:invoice, :payment_method]
+
+    def initialize(customer:, currency:, fees:, timestamp:, skip_psp: false, voided_invoice_id: nil, payment_method_params: nil, invoice_custom_section: {}, billing_entity_id: nil, billing_entity_code: nil, purchase_order_number: nil, with_discarded_add_ons: false)
       @customer = customer
       @currency = currency || customer&.currency
       @fees = fees
@@ -13,6 +15,8 @@ module Invoices
       @invoice_custom_section = invoice_custom_section
       @billing_entity_id = billing_entity_id
       @billing_entity_code = billing_entity_code
+      @purchase_order_number = purchase_order_number
+      @with_discarded_add_ons = with_discarded_add_ons
 
       super(nil)
     end
@@ -51,16 +55,18 @@ module Invoices
         invoice.payment_method = payment_method
         invoice.skip_automatic_payment = skip_psp
 
+        # NOTE: Custom sections are applied before computing taxes so they are persisted even when
+        #       tax computation is deferred to a tax provider (the `next` below skips the rest of the block).
+        unless skip_custom_sections?
+          Invoices::ApplyInvoiceCustomSectionsService.call(invoice:, custom_section_ids: invoice_custom_section_ids)
+        end
+
         totals_result = Invoices::ComputeTaxesAndTotalsService.call(invoice:)
         if totals_result.failure? && totals_result.error.is_a?(BaseService::UnknownTaxFailure)
           tax_deferred = true
           next
         end
         totals_result.raise_if_error!
-
-        unless skip_custom_sections?
-          Invoices::ApplyInvoiceCustomSectionsService.call(invoice:, custom_section_ids: invoice_custom_section_ids)
-        end
 
         invoice.payment_status = invoice.total_amount_cents.positive? ? :pending : :succeeded
         Invoices::TransitionToFinalStatusService.call(invoice:)
@@ -71,11 +77,11 @@ module Invoices
       return result if tax_deferred
 
       unless invoice.closed?
-        Utils::SegmentTrack.invoice_created(invoice)
-        SendWebhookJob.perform_later("invoice.one_off_created", invoice)
-        GenerateDocumentsJob.perform_later(invoice:, notify: should_deliver_email?)
-        Integrations::Aggregator::Invoices::CreateJob.perform_later(invoice:) if invoice.should_sync_invoice?
-        Integrations::Aggregator::Invoices::Hubspot::CreateJob.perform_later(invoice:) if invoice.should_sync_hubspot_invoice?
+        after_commit { Utils::SegmentTrack.invoice_created(invoice) }
+        SendWebhookJob.perform_after_commit("invoice.one_off_created", invoice)
+        GenerateDocumentsJob.perform_after_commit(invoice:, notify: should_deliver_email?)
+        Integrations::Aggregator::Invoices::CreateJob.perform_after_commit(invoice:) if invoice.should_sync_invoice?
+        Integrations::Aggregator::Invoices::Hubspot::CreateJob.perform_after_commit(invoice:) if invoice.should_sync_hubspot_invoice?
         Invoices::Payments::CreateService.call_async(invoice:, payment_method_params:) unless invoice.skip_automatic_payment?
       end
 
@@ -93,7 +99,7 @@ module Invoices
     private
 
     attr_accessor :timestamp, :currency, :customer, :fees, :invoice, :skip_psp, :voided_invoice_id, :payment_method_params, :invoice_custom_section
-    attr_reader :billing_entity_id, :billing_entity_code, :billing_entity
+    attr_reader :billing_entity_id, :billing_entity_code, :billing_entity, :purchase_order_number, :with_discarded_add_ons
 
     def create_generating_invoice
       invoice_result = Invoices::CreateGeneratingService.call(
@@ -101,7 +107,8 @@ module Invoices
         invoice_type: :one_off,
         currency:,
         datetime: Time.zone.at(timestamp),
-        billing_entity:
+        billing_entity:,
+        purchase_order_number:
       )
       invoice_result.raise_if_error!
 
@@ -109,10 +116,10 @@ module Invoices
     end
 
     def resolve_billing_entity
-      if multi_entity_enabled? && billing_entity_id.present?
+      if billing_entity_id.present?
         @billing_entity = customer.organization.billing_entities.find_by(id: billing_entity_id)
         result.not_found_failure!(resource: "billing_entity") if @billing_entity.nil?
-      elsif multi_entity_enabled? && billing_entity_code.present?
+      elsif billing_entity_code.present?
         @billing_entity = customer.organization.billing_entities.find_by(code: billing_entity_code)
         result.not_found_failure!(resource: "billing_entity") if @billing_entity.nil?
       else
@@ -120,12 +127,8 @@ module Invoices
       end
     end
 
-    def multi_entity_enabled?
-      customer.organization.feature_flag_enabled?(:multi_entity_billing)
-    end
-
     def create_one_off_fees(invoice)
-      Fees::OneOffService.call!(invoice:, fees:)
+      Fees::OneOffService.call!(invoice:, fees:, with_discarded_add_ons:)
     end
 
     def should_deliver_email?
@@ -135,7 +138,11 @@ module Invoices
     def add_ons
       finder = api_context? ? :code : :id
 
-      customer.organization.add_ons.where(finder => add_on_identifiers)
+      add_ons_scope.where(finder => add_on_identifiers)
+    end
+
+    def add_ons_scope
+      with_discarded_add_ons ? customer.organization.add_ons.with_discarded : customer.organization.add_ons
     end
 
     def add_on_identifiers

@@ -24,6 +24,7 @@ module BillableMetrics
         # Pay in advance fields
         :pay_in_advance_event, # Event that is triggering a pay in advance aggregation
         :pay_in_advance_aggregation, # Aggregation result for a single pay in advance event
+        :pay_in_advance_breakdowns, # Breakdown result for a single pay in advance event
         :pay_in_advance_precise_total_amount_cents, # Precise total amount in cents when in a pay in advance scenario
         # Cached aggregation fields
         :current_aggregation, # Current total aggregation cached in a pay in advance scenario (billing and current usage)
@@ -36,7 +37,7 @@ module BillableMetrics
 
       def self.null_result(result, grouped_by_keys: nil, apply_aggregation: false)
         if apply_aggregation && grouped_by_keys.present?
-          result.aggregations = [null_result(BaseService::Result.new, grouped_by_keys: grouped_by_keys)]
+          result.aggregations = [null_result(Result.new, grouped_by_keys: grouped_by_keys)]
         else
           result.grouped_by = grouped_by_keys.index_with { nil } if grouped_by_keys
           result.aggregation = 0
@@ -47,11 +48,11 @@ module BillableMetrics
         result
       end
 
-      def initialize(event_store_class:, charge:, subscription:, boundaries:, filters: {}, bypass_aggregation: false)
+      def initialize(event_store:, metered_item:, billing_context:, boundaries:, filters: {}, bypass_aggregation: false)
         super(nil)
-        @event_store_class = event_store_class
-        @charge = charge
-        @subscription = subscription
+        @event_store = event_store
+        @metered_item = metered_item
+        @billing_context = billing_context
 
         @filters = filters
         @charge_filter = filters[:charge_filter]
@@ -72,14 +73,14 @@ module BillableMetrics
       def aggregate(options: {})
         if grouped_by.present?
           compute_grouped_by_aggregation(options:)
-          if charge.dynamic?
+          if metered_item.dynamic?
             compute_grouped_by_precise_total_amount_cents(options:)
           end
 
           result.aggregations.each { apply_rounding(it) }
         else
           compute_aggregation(options:)
-          if charge.dynamic?
+          if metered_item.dynamic?
             compute_precise_total_amount_cents(options:)
           end
 
@@ -111,8 +112,12 @@ module BillableMetrics
       #   Used only for in advance billing
       def per_event_aggregation(exclude_event: false, include_event_value: false, grouped_by_values: nil)
         PerEventAggregationResult.new.tap do |result|
-          result.event_aggregation = event_store.with_grouped_by_values(grouped_by_values) do
-            compute_per_event_aggregation(exclude_event:, include_event_value:)
+          result.event_aggregation = if should_bypass_aggregation?
+            []
+          else
+            event_store.with_grouped_by_values(grouped_by_values) do
+              compute_per_event_aggregation(exclude_event:, include_event_value:)
+            end
           end
         end
       end
@@ -124,11 +129,13 @@ module BillableMetrics
         result
       end
 
+      delegate :precomputed?, to: :event_store
+
       protected
 
-      attr_accessor :event_store_class,
-        :charge,
-        :subscription,
+      attr_accessor :event_store,
+        :metered_item,
+        :billing_context,
         :filters,
         :charge_filter,
         :event,
@@ -139,26 +146,9 @@ module BillableMetrics
         :bypass_aggregation,
         :uniq_grouped_by_and_presentation_by
 
-      delegate :billable_metric, to: :charge
+      delegate :billable_metric, to: :metered_item
 
-      delegate :customer, to: :subscription
-
-      def event_store
-        @event_store ||= event_store_class.new(
-          code: billable_metric.code,
-          subscription:,
-          boundaries:,
-          filters:,
-          deduplicate: deduplicate?
-        )
-      end
-
-      def deduplicate?
-        organization = subscription&.organization
-        return false unless organization
-
-        organization.clickhouse_events_store? && organization.clickhouse_deduplication_enabled?
-      end
+      delegate :customer, to: :billing_context
 
       def from_datetime
         boundaries[:from_datetime]
@@ -172,6 +162,15 @@ module BillableMetrics
         return unless event
 
         (event.properties || {})[billable_metric.field_name] || 0
+      end
+
+      def build_pay_in_advance_breakdowns(value:)
+        return [] unless event
+        return [] if event.properties.blank?
+
+        groups = uniq_grouped_by_and_presentation_by.index_with { event.properties[it] }
+
+        [{groups:, value: BigDecimal(value.to_s)}]
       end
 
       def handle_in_advance_current_usage(total_aggregation, target_result: result)
@@ -199,6 +198,7 @@ module BillableMetrics
 
       def should_bypass_aggregation?
         return false if billable_metric.recurring?
+        return false if precomputed?
 
         bypass_aggregation
       end
@@ -213,8 +213,8 @@ module BillableMetrics
       def find_cached_aggregation(with_from_datetime:, with_to_datetime:, grouped_by: nil)
         query = CachedAggregation
           .where(organization_id: billable_metric.organization_id)
-          .where(external_subscription_id: subscription.external_id)
-          .where(charge_id: charge.id)
+          .where(external_subscription_id: billing_context.external_id)
+          .where(charge_id: metered_item.charge_id)
           .from_datetime(with_from_datetime)
           .to_datetime(with_to_datetime)
           .where(grouped_by: grouped_by.presence || {})

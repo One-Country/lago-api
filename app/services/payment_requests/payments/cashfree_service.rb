@@ -5,6 +5,7 @@ module PaymentRequests
     class CashfreeService < BaseService
       include Customers::PaymentProviderFinder
       include Updatable
+      include TypedResults
 
       PENDING_STATUSES = %w[PARTIALLY_PAID].freeze
       SUCCESS_STATUSES = %w[PAID].freeze
@@ -12,13 +13,15 @@ module PaymentRequests
 
       PROVIDER_NAME = "Cashfree"
 
-      def initialize(payable = nil)
+      RESULTS = {
+        generate_payment_url: BaseResult[:payment_url],
+        update_payment_status: BaseResult[:payment, :payable]
+      }.freeze
+
+      private
+
+      def generate_payment_url(payable)
         @payable = payable
-
-        super
-      end
-
-      def generate_payment_url
         payment_link_response = create_payment_link(payment_url_params)
         result.payment_url = JSON.parse(payment_link_response.body)["link_url"]
 
@@ -27,7 +30,7 @@ module PaymentRequests
         result.third_party_failure!(third_party: PROVIDER_NAME, error_code: e.error_code, error_message: e.error_body)
       end
 
-      def update_payment_status(organization_id:, status:, cashfree_payment:)
+      def update_payment_status(organization_id:, status:, cashfree_payment:, amount_cents: nil)
         payment = if cashfree_payment.metadata[:payment_type] == "one-time"
           create_payment(cashfree_payment)
         else
@@ -35,8 +38,9 @@ module PaymentRequests
         end
         return result.not_found_failure!(resource: "cashfree_payment") unless payment
 
+        @payable = payment.payable
         result.payment = payment
-        result.payable = payment.payable
+        result.payable = @payable
         return result if payment.payable.payment_succeeded?
 
         payment.status = status
@@ -59,9 +63,7 @@ module PaymentRequests
         result.fail_with_error!(e)
       end
 
-      private
-
-      attr_accessor :payable
+      attr_reader :payable
 
       delegate :organization, :customer, to: :payable
 
@@ -132,6 +134,8 @@ module PaymentRequests
 
       def update_invoices_payment_status(payment_status:, deliver_webhook: true)
         payable.invoices.each do |invoice|
+          next if invoice.payment_succeeded? && !payment_status_succeeded?(payment_status)
+
           Invoices::UpdateService.call(
             invoice:,
             params: {

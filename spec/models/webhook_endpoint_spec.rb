@@ -126,6 +126,16 @@ RSpec.describe WebhookEndpoint do
         end
       end
 
+      context "when event_types contains a renamed event type" do
+        let(:event_types) { ["invoice.drafted", "credit_note.provider_refund_failure"] }
+
+        it "replaces it with its current name" do
+          webhook_endpoint.valid?
+          expect(webhook_endpoint).to be_valid
+          expect(webhook_endpoint.event_types).to eq(["invoice.drafted", "credit_note.refund_failure"])
+        end
+      end
+
       context "when event_types is nil" do
         let(:event_types) { nil }
 
@@ -160,8 +170,53 @@ RSpec.describe WebhookEndpoint do
 
   describe "constants" do
     describe "WEBHOOK_EVENT_TYPES" do
-      it "matches SendWebhookJob::WEBHOOK_SERVICES" do
-        expect(WebhookEndpoint::WEBHOOK_EVENT_TYPES).to match_array(SendWebhookJob::WEBHOOK_SERVICES.keys.map(&:to_s))
+      it "documents exactly the pending product catalog handlers" do
+        temporary_product_catalog_types = %w[
+          product_category.created product_category.updated product_category.deleted
+          product.created product.updated product.deleted
+          product_filter.created product_filter.updated product_filter.deleted
+          rate_card.created rate_card.updated rate_card.deleted
+          rate_card_rate.created rate_card_rate.updated rate_card_rate.deleted
+          plan_rate_card.created plan_rate_card.updated plan_rate_card.deleted
+          contract_rate_card.created contract_rate_card.updated contract_rate_card.deleted
+          contract.created contract.updated contract.started contract.terminated contract.canceled
+        ]
+        documented_types = WebhookEndpoint::WEBHOOK_EVENT_TYPES
+        handler_types = SendWebhookJob::WEBHOOK_SERVICES.keys.map(&:to_s)
+        pending_types = documented_types - handler_types
+        undocumented_types = documented_types - handler_types - temporary_product_catalog_types
+
+        expect(pending_types).to match_array(temporary_product_catalog_types)
+        expect(undocumented_types).to be_empty
+        expect(handler_types - documented_types).to be_empty
+      end
+
+      it "matches the webhook_type each handler delivers" do
+        delivered_types = SendWebhookJob::WEBHOOK_SERVICES.transform_values do |service|
+          service.new(object: nil).send(:webhook_type)
+        end
+
+        expect(delivered_types).to eq(SendWebhookJob::WEBHOOK_SERVICES.to_h { |type, _| [type, type] })
+      end
+    end
+  end
+
+  describe "product catalog event type validation" do
+    subject(:webhook_endpoint) { build(:webhook_endpoint, event_types:) }
+
+    context "when selecting a documented product catalog event" do
+      let(:event_types) { ["product.created"] }
+
+      it "is valid regardless of catalog feature enablement" do
+        expect(webhook_endpoint).to be_valid
+      end
+    end
+
+    context "when selecting an unknown event" do
+      let(:event_types) { ["product.unknown"] }
+
+      it "is invalid" do
+        expect(webhook_endpoint).not_to be_valid
       end
     end
   end

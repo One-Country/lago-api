@@ -3,7 +3,9 @@
 require "rails_helper"
 
 RSpec.describe Invoices::Payments::AdyenService do
-  subject(:adyen_service) { described_class.new(invoice) }
+  subject(:adyen_service) do
+    described_class.new.tap { it.instance_variable_set(:@invoice, invoice) }
+  end
 
   let(:customer) { create(:customer, payment_provider_code: code) }
   let(:organization) { customer.organization }
@@ -32,7 +34,7 @@ RSpec.describe Invoices::Payments::AdyenService do
 
   let(:total_paid_amount_cents) { 0 }
 
-  describe ".update_payment_status" do
+  describe ".call(:update_payment_status)" do
     let(:payment) do
       create(
         :payment,
@@ -48,7 +50,9 @@ RSpec.describe Invoices::Payments::AdyenService do
     end
 
     it "updates the payment and invoice payment_status" do
-      result = adyen_service.update_payment_status(
+      result = described_class.call(
+        :update_payment_status,
+        organization_id: organization.id,
         provider_payment_id: "ch_123456",
         status: "Authorised"
       )
@@ -65,16 +69,44 @@ RSpec.describe Invoices::Payments::AdyenService do
 
     it "enqueues a SendWebhookJob for payment.succeeded" do
       expect do
-        adyen_service.update_payment_status(
+        described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
           provider_payment_id: "ch_123456",
           status: "Authorised"
         )
       end.to have_enqueued_job(SendWebhookJob).with("payment.succeeded", Payment)
     end
 
+    it_behaves_like "syncs payment" do
+      let(:service_call) do
+        described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
+          provider_payment_id: "ch_123456",
+          status: "Authorised"
+        )
+      end
+    end
+
+    context "when the customer has no accounting integration" do
+      it "does not enqueue an accounting payment sync job" do
+        expect do
+          described_class.call(
+            :update_payment_status,
+            organization_id: organization.id,
+            provider_payment_id: "ch_123456",
+            status: "Authorised"
+          )
+        end.not_to have_enqueued_job(Integrations::Aggregator::Payments::CreateJob)
+      end
+    end
+
     context "when status is failed" do
       it "updates the payment and invoice status" do
-        result = adyen_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
           provider_payment_id: "ch_123456",
           status: "Refused"
         )
@@ -87,13 +119,33 @@ RSpec.describe Invoices::Payments::AdyenService do
           ready_for_payment_processing: true
         )
       end
+
+      context "when the customer has an accounting integration syncing payments" do
+        let(:integration) { create(:netsuite_integration, organization:, sync_payments: true) }
+        let(:integration_customer) { create(:netsuite_customer, integration:, customer:) }
+
+        before { integration_customer }
+
+        it "does not enqueue an accounting payment sync job" do
+          expect do
+            described_class.call(
+              :update_payment_status,
+              organization_id: organization.id,
+              provider_payment_id: "ch_123456",
+              status: "Refused"
+            )
+          end.not_to have_enqueued_job(Integrations::Aggregator::Payments::CreateJob)
+        end
+      end
     end
 
     context "when invoice is already payment_succeeded" do
       before { invoice.payment_succeeded! }
 
       it "does not update the status of invoice and payment" do
-        result = adyen_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
           provider_payment_id: "ch_123456",
           status: %w[Authorised SentForSettle SettleScheduled Settled Refunded].sample
         )
@@ -105,7 +157,9 @@ RSpec.describe Invoices::Payments::AdyenService do
 
     context "with invalid status" do
       it "does not update the payment_status of invoice" do
-        result = adyen_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
           provider_payment_id: "ch_123456",
           status: "foo-bar"
         )
@@ -126,7 +180,9 @@ RSpec.describe Invoices::Payments::AdyenService do
       end
 
       it "creates a payment and updates invoice payment status" do
-        result = adyen_service.update_payment_status(
+        result = described_class.call(
+          :update_payment_status,
+          organization_id: organization.id,
           provider_payment_id: "ch_123456",
           status: "succeeded",
           metadata: {lago_invoice_id: invoice.id, payment_type: "one-time"}
@@ -138,6 +194,36 @@ RSpec.describe Invoices::Payments::AdyenService do
         expect(result.invoice.reload).to have_attributes(
           payment_status: "succeeded",
           ready_for_payment_processing: false
+        )
+      end
+    end
+
+    context "when the one time payment references an invoice of another organization" do
+      let(:payment) { nil }
+      let(:other_organization) { create(:organization) }
+
+      before do
+        adyen_payment_provider
+        adyen_customer
+      end
+
+      it "does not create a payment and returns a not found failure" do
+        result = described_class.call(
+          :update_payment_status,
+          organization_id: other_organization.id,
+          provider_payment_id: "ch_123456",
+          status: "succeeded",
+          metadata: {lago_invoice_id: invoice.id, payment_type: "one-time"}
+        )
+
+        expect(result).not_to be_success
+        expect(result.error).to be_a(BaseService::NotFoundFailure)
+        expect(result.error.resource).to eq("invoice")
+        expect(Payment.count).to eq(0)
+        expect(invoice.reload).to have_attributes(
+          payment_status: "pending",
+          payment_attempts: 0,
+          ready_for_payment_processing: true
         )
       end
     end
@@ -212,7 +298,7 @@ RSpec.describe Invoices::Payments::AdyenService do
     end
   end
 
-  describe "#generate_payment_url" do
+  describe ".call(:generate_payment_url)" do
     let(:payment_intent) { create(:payment_intent) }
 
     before do
@@ -230,7 +316,7 @@ RSpec.describe Invoices::Payments::AdyenService do
     end
 
     it "generates payment url" do
-      adyen_service.generate_payment_url(payment_intent)
+      described_class.call(:generate_payment_url, invoice, payment_intent)
 
       expect(payment_links_api).to have_received(:payment_links)
     end
@@ -242,7 +328,7 @@ RSpec.describe Invoices::Payments::AdyenService do
       end
 
       it "returns a failed result" do
-        result = adyen_service.generate_payment_url(payment_intent)
+        result = described_class.call(:generate_payment_url, invoice, payment_intent)
 
         expect(result).not_to be_success
 

@@ -17,16 +17,17 @@ module PaymentIntents
 
       if payment_intent.payment_url.blank?
         payment_url_result = Invoices::Payments::PaymentProviders::Factory
-          .new_instance(invoice:)
-          .generate_payment_url(payment_intent)
-
-        payment_url_result.raise_if_error!
+          .for(invoice)
+          .call!(:generate_payment_url, invoice, payment_intent)
 
         if payment_url_result.payment_url.blank?
           return result.single_validation_failure!(error_code: "payment_provider_error")
         end
 
-        payment_intent.update!(payment_url: payment_url_result.payment_url)
+        payment_intent.update!(
+          payment_url: payment_url_result.payment_url,
+          provider_session_id: payment_url_result.provider_session_id
+        )
       end
 
       result.payment_intent = payment_intent

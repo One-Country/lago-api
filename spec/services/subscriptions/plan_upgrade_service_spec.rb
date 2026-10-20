@@ -18,14 +18,14 @@ RSpec.describe Subscriptions::PlanUpgradeService do
       external_id: SecureRandom.uuid
     )
   end
-
-  let(:old_plan) { create(:plan, amount_cents: 100, organization:, amount_currency: currency) }
-  let(:customer) { create(:customer, :with_hubspot_integration, organization:, currency:) }
-  let(:organization) { create(:organization) }
-  let(:currency) { "EUR" }
-  let(:plan) { create(:plan, amount_cents: 100, organization:) }
   let(:params) { {name: subscription_name} }
   let(:subscription_name) { "new invoice display name" }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:currency, refind: true) { "EUR" }
+  let_it_be(:old_plan, refind: true) { create(:plan, amount_cents: 100, organization:, amount_currency: currency) }
+  let_it_be(:customer, refind: true) { create(:customer, :with_hubspot_integration, organization:, currency:) }
+  let_it_be(:plan, refind: true) { create(:plan, amount_cents: 100, organization:) }
 
   describe "#call" do
     before do
@@ -99,6 +99,44 @@ RSpec.describe Subscriptions::PlanUpgradeService do
         it "applies the override on the new subscription" do
           expect(result).to be_success
           expect(result.subscription.consolidate_invoice).to be(true)
+        end
+      end
+    end
+
+    context "when the current subscription has a purchase_order_number" do
+      let(:subscription) do
+        create(
+          :subscription,
+          customer:,
+          plan: old_plan,
+          status: :active,
+          subscription_at: Time.current,
+          started_at: Time.current,
+          external_id: SecureRandom.uuid,
+          purchase_order_number: "PO-OLD"
+        )
+      end
+
+      it "inherits the purchase_order_number when params omit it" do
+        expect(result).to be_success
+        expect(result.subscription.purchase_order_number).to eq("PO-OLD")
+      end
+
+      context "when params provide a purchase_order_number" do
+        let(:params) { {name: subscription_name, purchase_order_number: "PO-NEW"} }
+
+        it "sets it on the new subscription" do
+          expect(result).to be_success
+          expect(result.subscription.purchase_order_number).to eq("PO-NEW")
+        end
+      end
+
+      context "when params provide an explicit nil purchase_order_number" do
+        let(:params) { {name: subscription_name, purchase_order_number: nil} }
+
+        it "clears it on the new subscription" do
+          expect(result).to be_success
+          expect(result.subscription.purchase_order_number).to be_nil
         end
       end
     end
@@ -201,6 +239,76 @@ RSpec.describe Subscriptions::PlanUpgradeService do
           expect { result }
             .to change { subscription.reload.activation_rules.count }
             .from(1).to(0)
+        end
+      end
+    end
+
+    context "with activation_rules in params" do
+      let(:params) do
+        {
+          name: subscription_name,
+          activation_rules: [{type: "payment", timeout_hours: 48}]
+        }
+      end
+
+      context "when the plan is pay-in-advance" do
+        let_it_be(:plan, refind: true) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true) }
+
+        it "keeps the current subscription active" do
+          result
+          expect(subscription.reload).to be_active
+        end
+
+        it "creates the new subscription as incomplete" do
+          expect(result).to be_success
+          expect(result.subscription).to be_incomplete
+          expect(result.subscription.previous_subscription_id).to eq(subscription.id)
+          expect(result.subscription.activation_rules.pending.count).to eq(1)
+        end
+
+        it "sends the subscription.incomplete webhook" do
+          result
+          expect(SendWebhookJob).to have_been_enqueued.with("subscription.incomplete", result.subscription)
+        end
+
+        it "does not fire upgrade-completion webhooks" do
+          result
+          expect(SendWebhookJob).not_to have_been_enqueued.with("subscription.terminated", subscription)
+          expect(SendWebhookJob).not_to have_been_enqueued.with("subscription.started", result.subscription)
+        end
+
+        it "enqueues BillSubscriptionJob for the incomplete subscription with skip_charges" do
+          new_subscription = result.subscription
+
+          expect(BillSubscriptionJob).to have_been_enqueued
+            .with([new_subscription], anything, invoicing_reason: :upgrading, skip_charges: true)
+        end
+
+        context "with a pending next_subscription" do
+          let(:pending_next) do
+            create(:subscription, status: :pending, previous_subscription: subscription, organization:, customer:)
+          end
+
+          before { pending_next }
+
+          it "cancels the pending next_subscription before gating" do
+            expect { result }.to change { pending_next.reload.status }.from("pending").to("canceled")
+          end
+        end
+      end
+
+      context "when the plan has no upfront billing" do
+        let_it_be(:plan, refind: true) { create(:plan, amount_cents: 100, organization:, pay_in_advance: false) }
+
+        it "marks the activation rule as not_applicable" do
+          expect(result).to be_success
+          expect(result.subscription.activation_rules.not_applicable.count).to eq(1)
+        end
+
+        it "runs the existing immediate-upgrade flow" do
+          result
+          expect(subscription.reload).to be_terminated
+          expect(result.subscription).to be_active
         end
       end
     end
@@ -323,7 +431,7 @@ RSpec.describe Subscriptions::PlanUpgradeService do
     end
 
     context "when new subscription is pay in advance and has trial period" do
-      let(:plan) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true, trial_period: 3) }
+      let_it_be(:plan, refind: true) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true, trial_period: 3) }
 
       context "without pay in advance fixed charges" do
         it "does not include new subscription in BillSubscriptionJob" do
@@ -368,34 +476,10 @@ RSpec.describe Subscriptions::PlanUpgradeService do
     end
 
     describe "billing entity binding" do
-      let(:billing_entity) { create(:billing_entity, organization:) }
-      let(:other_entity) { create(:billing_entity, organization:) }
+      let_it_be(:billing_entity, refind: true) { create(:billing_entity, organization:) }
+      let_it_be(:other_entity, refind: true) { create(:billing_entity, organization:) }
 
-      context "when multi_entity_billing flag is OFF" do
-        it "carries over the current subscription's billing_entity_id even without params" do
-          subscription.update!(billing_entity:)
-
-          expect(result).to be_success
-          expect(result.subscription.billing_entity_id).to eq(billing_entity.id)
-        end
-
-        it "ignores billing_entity_code in params but still carries over" do
-          subscription.update!(billing_entity:)
-          params[:billing_entity_code] = other_entity.code
-
-          expect(result).to be_success
-          expect(result.subscription.billing_entity_id).to eq(billing_entity.id)
-        end
-
-        it "persists nil when current subscription has no billing entity binding" do
-          expect(result).to be_success
-          expect(result.subscription.billing_entity_id).to be_nil
-        end
-      end
-
-      context "when multi_entity_billing flag is ON" do
-        before { organization.enable_feature_flag!(:multi_entity_billing) }
-
+      context "when binding a billing entity" do
         it "carries over the current subscription's billing_entity_id when no param is provided" do
           subscription.update!(billing_entity:)
 
@@ -450,9 +534,7 @@ RSpec.describe Subscriptions::PlanUpgradeService do
       end
 
       context "when bill_subscriptions runs after the upgrade" do
-        let(:plan) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true) }
-
-        before { organization.enable_feature_flag!(:multi_entity_billing) }
+        let_it_be(:plan, refind: true) { create(:plan, amount_cents: 200, organization:, pay_in_advance: true) }
 
         it "carries the current subscription's entity into termination and new-period billing context" do
           subscription.update!(billing_entity:)

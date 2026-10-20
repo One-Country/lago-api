@@ -5,15 +5,26 @@ require "rails_helper"
 RSpec.describe Plans::OverrideService do
   subject(:override_service) { described_class.new(plan: parent_plan, params:, subscription:) }
 
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:membership) { create(:membership) }
   let(:subscription) { nil }
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
+  describe "product catalog gating", :premium do
+    it "rejects overriding any plan of a catalog organization" do
+      organization = create(:organization, feature_flags: ["product_catalog"])
+      legacy_plan = create(:plan, organization:)
+
+      result = described_class.call(plan: legacy_plan, params: {amount_cents: 100})
+
+      expect(result).to be_failure
+      expect(result.error.messages[:plan_overrides]).to eq(["legacy_billing_disabled"])
+    end
+  end
 
   describe "#call", :premium do
-    let(:parent_plan) { create(:plan, organization:) }
-    let(:billable_metric) { create(:billable_metric, organization:) }
-    let(:add_on) { create(:add_on, organization:) }
+    let_it_be(:parent_plan, refind: true) { create(:plan, organization:) }
+    let_it_be(:billable_metric, refind: true) { create(:billable_metric, organization:) }
+    let_it_be(:add_on, refind: true) { create(:add_on, organization:) }
     let(:billable_metric_filter) { create(:billable_metric_filter, billable_metric:) }
     let(:tax) { create(:tax, organization:) }
 
@@ -109,7 +120,6 @@ RSpec.describe Plans::OverrideService do
       charge
       fixed_charge
       usage_threshold
-      allow(SegmentTrackJob).to receive(:perform_later)
       filter_value
     end
 
@@ -153,7 +163,7 @@ RSpec.describe Plans::OverrideService do
     it "calls SegmentTrackJob" do
       plan = override_service.call.plan
 
-      expect(SegmentTrackJob).to have_received(:perform_later).with(
+      expect(SegmentTrackJob).to have_been_enqueued.with(
         membership_id: CurrentContext.membership,
         event: "plan_created",
         properties: {
@@ -224,6 +234,21 @@ RSpec.describe Plans::OverrideService do
       )
     end
 
+    it "passes the overridden plan to charge overrides" do
+      allow(Charges::OverrideService).to receive(:call).and_call_original
+
+      result = override_service.call
+
+      expect(Charges::OverrideService).to have_received(:call).with(
+        charge:,
+        params: {
+          id: charge.id,
+          min_amount_cents: 1000,
+          plan: result.plan
+        }
+      )
+    end
+
     it "creates fixed charges based from the parent plan" do
       expect { override_service.call }.to change(Plan, :count).by(1)
       plan = Plan.order(:created_at).last
@@ -241,10 +266,17 @@ RSpec.describe Plans::OverrideService do
         expect { override_service.call }.not_to change(Plan, :count)
         expect(override_service.call).not_to be_success
       end
+
+      it "returns the service's own result exposing plan" do
+        result = override_service.call
+
+        expect(result).to be_a(described_class::Result)
+        expect(result.plan).to be_nil
+      end
     end
 
     context "when subscription parameter is provided" do
-      let(:customer) { create(:customer, organization:) }
+      let_it_be(:customer) { create(:customer, organization:) }
       let(:subscription) { create(:subscription, plan: parent_plan, customer:) }
 
       it "creates a plan successfully with subscription parameter" do

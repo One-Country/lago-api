@@ -5,6 +5,8 @@ module Api
     class InvoicesController < Api::BaseController
       include InvoiceIndex
 
+      before_action :ensure_x402_payments_enabled, only: [:x402_payment_url]
+
       def create
         result = Invoices::CreateOneOffService.call(
           customer:,
@@ -14,7 +16,8 @@ module Api
           skip_psp: create_params[:skip_psp],
           invoice_custom_section: create_params[:invoice_custom_section] || {},
           payment_method_params: create_params[:payment_method],
-          billing_entity_code: create_params[:billing_entity_code]
+          billing_entity_code: create_params[:billing_entity_code],
+          purchase_order_number: create_params[:purchase_order_number]
         )
 
         if result.success?
@@ -26,6 +29,8 @@ module Api
 
       def update
         invoice = current_organization.invoices.visible.find_by(id: params[:id])
+
+        return method_not_allowed_error(code: "update_on_voided_invoice") if invoice&.voided?
 
         result = Invoices::UpdateService.new(
           invoice:,
@@ -127,6 +132,17 @@ module Api
         end
       end
 
+      def destroy
+        invoice = current_organization.invoices.visible.find_by(id: params[:id])
+
+        result = Invoices::DeleteService.call(invoice:)
+        if result.success?
+          render_invoice(result.invoice)
+        else
+          render_error_response(result)
+        end
+      end
+
       def lose_dispute
         invoice = current_organization.invoices.visible.find_by(id: params[:id])
 
@@ -194,6 +210,30 @@ module Api
               root_name: "invoice_payment_details",
               payment_url: result.payment_url
             )
+          )
+        else
+          render_error_response(result)
+        end
+      end
+
+      def x402_payment_url
+        invoice = current_organization.invoices.visible.find_by(id: params[:id])
+        return not_found_error(resource: "invoice") unless invoice
+
+        result = ::X402::Invoices::MintPaymentLinkService.call(
+          invoice:,
+          connection_code: x402_payment_url_params[:connection_code]
+        )
+
+        if result.success?
+          render(
+            json: {
+              invoice_x402_payment_details: {
+                lago_invoice_id: invoice.id,
+                x402_connection_code: invoice.x402_connection.code,
+                x402_payment_url: invoice.x402_payment_url
+              }
+            }
           )
         else
           render_error_response(result)
@@ -277,6 +317,7 @@ module Api
               :currency,
               :skip_psp,
               :billing_entity_code,
+              :purchase_order_number,
               fees: [
                 :add_on_code,
                 :invoice_display_name,
@@ -316,6 +357,14 @@ module Api
             :payment_method_id
           ]
         ).to_h.deep_symbolize_keys
+      end
+
+      def x402_payment_url_params
+        params.permit(:connection_code)
+      end
+
+      def ensure_x402_payments_enabled
+        forbidden_error(code: "feature_unavailable") unless current_organization.x402_payments_enabled?
       end
 
       def preview_params

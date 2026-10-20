@@ -20,21 +20,19 @@ RSpec.describe Invoices::ApplyProviderTaxesService do
   end
   let(:fees_amount_cents) { 3000 }
   let(:coupons_amount_cents) { 0 }
-  let(:result) { BaseService::Result.new }
+  let(:result) { Integrations::Aggregator::Taxes::Invoices::CreateService::Result.new }
 
   let(:fee_taxes) do
     [
-      OpenStruct.new(
+      build(:tax_result,
         tax_breakdown: [
-          OpenStruct.new(name: "tax 1", type: "type1", rate: "0.10")
-        ]
-      ),
-      OpenStruct.new(
+          build(:tax_breakdown_item, name: "tax 1", type: "type1", rate: "0.10")
+        ]),
+      build(:tax_result,
         tax_breakdown: [
-          OpenStruct.new(name: "tax 1", type: "type1", rate: "0.10"),
-          OpenStruct.new(name: "tax 2", type: "type2", rate: "0.12")
-        ]
-      )
+          build(:tax_breakdown_item, name: "tax 1", type: "type1", rate: "0.10"),
+          build(:tax_breakdown_item, name: "tax 2", type: "type2", rate: "0.12")
+        ])
     ]
   end
 
@@ -45,6 +43,45 @@ RSpec.describe Invoices::ApplyProviderTaxesService do
         allow(Integrations::Aggregator::Taxes::Invoices::CreateService).to receive(:call)
           .with(invoice:)
           .and_return(result)
+      end
+
+      context "when the invoice has no taxable base" do
+        let(:fees_amount_cents) { 1000 }
+        let(:coupons_amount_cents) { 1000 }
+        let(:fee_taxes) do
+          [
+            build(:tax_result,
+              tax_breakdown: [
+                build(:tax_breakdown_item, name: "tax 1", type: "type1", rate: "0.10", tax_amount: 0)
+              ])
+          ]
+        end
+        let(:reported_fee) { create(:fee, invoice:, amount_cents: 1000, precise_coupons_amount_cents: 1000) }
+        let(:untaxed_fee) { create(:fee, invoice:, amount_cents: 0, precise_coupons_amount_cents: 0) }
+        let(:reported_fee_applied_tax) do
+          create(
+            :fee_applied_tax,
+            fee: reported_fee,
+            amount_cents: 0,
+            tax_name: "tax 1",
+            tax_code: "tax_1",
+            tax_rate: 10.0,
+            tax_description: "type1"
+          )
+        end
+
+        before do
+          reported_fee
+          reported_fee_applied_tax
+          untaxed_fee
+        end
+
+        it "prorates the rate over the fees that carry a tax, not every fee" do
+          result = apply_service.call
+
+          expect(result).to be_success
+          expect(invoice.taxes_rate).to eq(10.0)
+        end
       end
 
       context "with non zero fees amount" do
@@ -229,20 +266,18 @@ RSpec.describe Invoices::ApplyProviderTaxesService do
             context "when tax provider returned specific rule applied to fees - #{applied_rule[:expected_name]}" do
               let(:fee_taxes) do
                 [
-                  OpenStruct.new(
+                  build(:tax_result,
                     tax_amount_cents: 0,
                     tax_breakdown: [
-                      OpenStruct.new(name: applied_rule[:expected_name], type: applied_rule[:received_type],
+                      build(:tax_breakdown_item, name: applied_rule[:expected_name], type: applied_rule[:received_type],
                         rate: "0.00", tax_amount: 0)
-                    ]
-                  ),
-                  OpenStruct.new(
+                    ]),
+                  build(:tax_result,
                     tax_amount_cents: 0,
                     tax_breakdown: [
-                      OpenStruct.new(name: applied_rule[:expected_name], type: applied_rule[:received_type],
+                      build(:tax_breakdown_item, name: applied_rule[:expected_name], type: applied_rule[:received_type],
                         rate: "0.00", tax_amount: 0)
-                    ]
-                  )
+                    ])
                 ]
               end
               let(:fee1) { create(:fee, invoice:, amount_cents: 1000, precise_coupons_amount_cents: 0) }
@@ -282,14 +317,12 @@ RSpec.describe Invoices::ApplyProviderTaxesService do
         context "with seller paying taxes" do
           let(:fee_taxes) do
             [
-              OpenStruct.new(
+              build(:tax_result,
                 tax_amount_cents: 0,
-                tax_breakdown: [OpenStruct.new(name: "Tax", type: "tax", rate: "0.00", tax_amount: 0)]
-              ),
-              OpenStruct.new(
+                tax_breakdown: [build(:tax_breakdown_item, name: "Tax", type: "tax", rate: "0.00", tax_amount: 0)]),
+              build(:tax_result,
                 tax_amount_cents: 0,
-                tax_breakdown: [OpenStruct.new(name: "Tax", type: "tax", rate: "0.00", tax_amount: 0)]
-              )
+                tax_breakdown: [build(:tax_breakdown_item, name: "Tax", type: "tax", rate: "0.00", tax_amount: 0)])
             ]
           end
           let(:fee1) { create(:fee, invoice:, amount_cents: 1000, precise_coupons_amount_cents: 0) }

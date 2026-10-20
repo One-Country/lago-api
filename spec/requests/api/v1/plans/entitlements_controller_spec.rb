@@ -3,8 +3,8 @@
 require "rails_helper"
 
 RSpec.describe Api::V1::Plans::EntitlementsController do
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
   let(:feature) { create(:feature, organization:, code: "seats") }
   let(:privilege) { create(:privilege, organization:, feature:, code: "max", value_type: "integer") }
 
@@ -26,6 +26,17 @@ RSpec.describe Api::V1::Plans::EntitlementsController do
       expect(json[:entitlements]).to be_present
       expect(json[:entitlements].length).to eq(1)
       expect(json[:entitlements].first[:privileges].sole[:value]).to eq(30)
+    end
+
+    context "when the entitlement feature is discarded" do
+      before { feature.discard! }
+
+      it "does not return the orphaned entitlement" do
+        subject
+
+        expect(response).to have_http_status(:success)
+        expect(json[:entitlements]).to eq([])
+      end
     end
 
     context "when plan has children (subscription plan overrides)" do

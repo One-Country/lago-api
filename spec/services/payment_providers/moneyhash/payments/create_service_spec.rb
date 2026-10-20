@@ -3,23 +3,20 @@
 require "rails_helper"
 
 RSpec.describe PaymentProviders::Moneyhash::Payments::CreateService do
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create(:organization) }
   let(:moneyhash_provider) { create(:moneyhash_provider, organization:) }
-  let(:customer) { create(:customer, organization:) }
   let(:moneyhash_customer) { create(:moneyhash_customer, customer:, payment_provider: moneyhash_provider) }
-
   let(:reference) { "1234567890" }
   let(:metadata) { {} }
-
   let(:invoice) { create(:invoice, organization:, customer:, invoice_type: :subscription) }
   let(:payment) { create(:payment, payable: invoice, payment_provider: moneyhash_provider, payment_provider_customer: moneyhash_customer) }
-
   let(:failure_response) { JSON.parse(File.read("spec/fixtures/moneyhash/recurring_mit_payment_failure_response.json")) }
   let(:success_response) { JSON.parse(File.read("spec/fixtures/moneyhash/recurring_mit_payment_success_response.json")) }
-
   let(:lago_client) { instance_double(LagoHttpClient::Client) }
   let(:response) { instance_double(Net::HTTPOK) }
   let(:endpoint) { "#{PaymentProviders::MoneyhashProvider.api_base_url}/api/v1.1/payments/intent/" }
+
+  let_it_be(:customer) { create(:customer, organization:) }
 
   describe "#call" do
     before do
@@ -56,12 +53,10 @@ RSpec.describe PaymentProviders::Moneyhash::Payments::CreateService do
         expect(result).to be_failure
         expect(result.error_code).to eq(400)
         expect(result.error_message).to eq(failure_response)
-        expect(payment.status).to eq("PENDING")
-        expect(payment.payable_payment_status).to eq("processing")
       end
     end
 
-    context "when multiple_payment_methods feature flag is enabled" do
+    context "when payment has a payment method" do
       let(:payment_method) do
         create(:payment_method,
           customer:,
@@ -70,7 +65,6 @@ RSpec.describe PaymentProviders::Moneyhash::Payments::CreateService do
       end
 
       before do
-        organization.update!(feature_flags: ["multiple_payment_methods"])
         payment.update!(payment_method:)
         allow(lago_client).to receive(:post_with_response).and_return(response)
         allow(response).to receive(:body).and_return(success_response.to_json)
@@ -81,28 +75,6 @@ RSpec.describe PaymentProviders::Moneyhash::Payments::CreateService do
 
         expect(lago_client).to have_received(:post_with_response) do |params, _headers|
           expect(params[:card_token]).to eq("pm_test_123")
-        end
-      end
-    end
-
-    context "when multiple_payment_methods feature flag is disabled" do
-      let(:moneyhash_customer) do
-        create(:moneyhash_customer,
-          customer:,
-          payment_provider: moneyhash_provider,
-          payment_method_id: "legacy_pm_456")
-      end
-
-      before do
-        allow(lago_client).to receive(:post_with_response).and_return(response)
-        allow(response).to receive(:body).and_return(success_response.to_json)
-      end
-
-      it "uses provider_customer payment_method_id as card_token" do
-        described_class.call(payment:, reference:, metadata:)
-
-        expect(lago_client).to have_received(:post_with_response) do |params, _headers|
-          expect(params[:card_token]).to eq("legacy_pm_456")
         end
       end
     end

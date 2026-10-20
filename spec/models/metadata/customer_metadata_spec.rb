@@ -5,7 +5,9 @@ require "rails_helper"
 RSpec.describe Metadata::CustomerMetadata do
   subject(:metadata) { described_class.new(attributes) }
 
-  let(:customer) { create(:customer) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
+
   let(:key) { "hello" }
   let(:value) { "abcdef" }
   let(:attributes) do
@@ -43,6 +45,16 @@ RSpec.describe Metadata::CustomerMetadata do
       let(:value) { "a" * 101 }
 
       it { expect(metadata).not_to be_valid }
+    end
+  end
+
+  describe "normalizations" do
+    let(:key) { "he\u0000llo" }
+    let(:value) { "wo\u0000rld" }
+
+    it "strips null bytes from key and value" do
+      expect(metadata.key).to eq("hello")
+      expect(metadata.value).to eq("world")
     end
   end
 end

@@ -33,7 +33,9 @@ module Api
           filters: {
             status: params[:status],
             transaction_type: params[:transaction_type],
-            transaction_status: params[:transaction_status]
+            transaction_status: params[:transaction_status],
+            # Only a nested hash param (?metadata[key]=value) responds to permit!; scalar/array shapes are ignored.
+            metadata: params[:metadata].respond_to?(:permit!) ? params[:metadata].permit!.to_h : {}
           }
         )
 
@@ -41,7 +43,7 @@ module Api
 
         render(
           json: ::CollectionSerializer.new(
-            result.wallet_transactions,
+            result.wallet_transactions.includes(:billing_entity, wallet: {customer: :billing_entity}),
             ::V1::WalletTransactionSerializer,
             collection_name: "wallet_transactions",
             meta: pagination_metadata(result.wallet_transactions)
@@ -104,16 +106,17 @@ module Api
 
         return render_error_response(result) unless result.success?
 
-        includes = (direction == :consumptions) ? %i[outbound_wallet_transaction] : %i[inbound_wallet_transaction]
+        wallet_transaction_direction = (direction == :consumptions) ? :outbound_wallet_transaction : :inbound_wallet_transaction
+        preloads = {wallet_transaction_direction => [:billing_entity, {wallet: [:billing_entity, {customer: :billing_entity}]}]}
         collection_name = (direction == :consumptions) ? "wallet_transaction_consumptions" : "wallet_transaction_fundings"
 
         render(
           json: ::CollectionSerializer.new(
-            result.wallet_transaction_consumptions.includes(includes),
+            result.wallet_transaction_consumptions.includes(preloads),
             ::V1::WalletTransactionConsumptionSerializer,
             collection_name:,
             meta: pagination_metadata(result.wallet_transaction_consumptions),
-            includes:
+            includes: [wallet_transaction_direction]
           )
         )
       end
@@ -124,8 +127,10 @@ module Api
           :paid_credits,
           :granted_credits,
           :voided_credits,
+          :voided_transaction_id,
           :invoice_requires_successful_payment,
           :name,
+          :purchase_order_number,
           :ignore_paid_top_up_limits,
           :priority,
           payment_method: [

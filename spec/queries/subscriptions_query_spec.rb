@@ -6,15 +6,14 @@ RSpec.describe SubscriptionsQuery do
   subject(:result) { described_class.call(organization:, pagination:, filters:, search_term:) }
 
   let(:returned_ids) { result.subscriptions.pluck(:id) }
-
-  let(:organization) { create(:organization) }
   let(:pagination) { nil }
   let(:filters) { {} }
   let(:search_term) { nil }
-
-  let(:customer) { create(:customer, organization:) }
-  let(:plan) { create(:plan, organization:) }
   let(:subscription) { create(:subscription, customer:, plan:) }
+
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
+  let_it_be(:plan) { create(:plan, organization:) }
 
   before { subscription }
 
@@ -76,8 +75,12 @@ RSpec.describe SubscriptionsQuery do
   end
 
   context "with search_term" do
+    let_it_be(:plan) { create(:plan, organization:, name: "Test Plan") }
     let(:subscription) { create(:subscription, customer:, plan:, name: "Test Subscription") }
+    let(:other_subscription) { create(:subscription, customer:, plan: other_plan, name: "Other Subscription") }
     let(:subscription_2) { create(:subscription, customer:, plan:, name: "Test Subscription 2") }
+
+    let_it_be(:other_plan) { create(:plan, organization:, name: "Other Plan") }
 
     before { subscription_2 }
 
@@ -108,6 +111,30 @@ RSpec.describe SubscriptionsQuery do
         expect(result).to be_success
         expect(result.subscriptions.count).to eq(1)
         expect(result.subscriptions).to eq([subscription])
+      end
+    end
+
+    context "when search_term is a plan name" do
+      let(:search_term) { plan.name }
+
+      before { other_subscription }
+
+      it "returns only subscriptions for the specified plan name" do
+        expect(result).to be_success
+        expect(result.subscriptions.count).to eq(2)
+        expect(result.subscriptions).to match_array([subscription, subscription_2])
+      end
+    end
+
+    context "when search_term is a plan code" do
+      let(:search_term) { plan.code }
+
+      before { other_subscription }
+
+      it "returns only subscriptions for the specified plan code" do
+        expect(result).to be_success
+        expect(result.subscriptions.count).to eq(2)
+        expect(result.subscriptions).to match_array([subscription, subscription_2])
       end
     end
 
@@ -163,6 +190,28 @@ RSpec.describe SubscriptionsQuery do
         expect(result).to be_success
         expect(result.subscriptions.count).to eq(1)
         expect(result.subscriptions).to match_array([subscription_3])
+      end
+    end
+  end
+
+  context "with external_id filter" do
+    let(:filters) { {external_id: subscription.external_id} }
+
+    it "applies the filter" do
+      expect(result).to be_success
+      expect(result.subscriptions).to match_array([subscription])
+    end
+
+    context "when search_term is present" do
+      let(:search_term) { subscription.external_id }
+
+      before do
+        create(:subscription, plan:, name: subscription.external_id)
+      end
+
+      it "ignores the search_term" do
+        expect(result).to be_success
+        expect(result.subscriptions).to match_array([subscription])
       end
     end
   end
@@ -282,9 +331,10 @@ RSpec.describe SubscriptionsQuery do
   context "with overriden filter" do
     let(:filters) { {} }
     let(:plan) { create(:plan, organization:, parent: parent_plan) }
+    let(:subscription_2) { create(:subscription, customer:, plan: parent_plan) }
+
     let(:parent_plan) { create(:plan, organization:) }
     let(:subscription) { create(:subscription, customer:, plan:) }
-    let(:subscription_2) { create(:subscription, customer:, plan: parent_plan) }
 
     before { [subscription, subscription_2] }
 
@@ -318,8 +368,8 @@ RSpec.describe SubscriptionsQuery do
   end
 
   context "with billing_entity_ids filter" do
-    let(:us_entity) { create(:billing_entity, organization:, code: "us") }
-    let(:eu_entity) { create(:billing_entity, organization:, code: "eu") }
+    let_it_be(:us_entity) { create(:billing_entity, organization:, code: "us") }
+    let_it_be(:eu_entity) { create(:billing_entity, organization:, code: "eu") }
     let(:subscription) { create(:subscription, customer:, plan:, billing_entity: us_entity) }
     let(:us_subscription) { subscription }
     let(:eu_subscription) { create(:subscription, customer:, plan:, billing_entity: eu_entity) }
@@ -355,11 +405,44 @@ RSpec.describe SubscriptionsQuery do
         expect(result.subscriptions).to match_array([eu_subscription, us_subscription])
       end
     end
+
+    context "when a subscription has NULL billing_entity_id inherits from customer" do
+      let_it_be(:us_customer) { create(:customer, organization:, billing_entity: us_entity) }
+      let_it_be(:eu_customer) { create(:customer, organization:, billing_entity: eu_entity) }
+
+      let!(:inherits_eu) { create(:subscription, customer: eu_customer, plan:, billing_entity: nil) }
+      let!(:inherits_us) { create(:subscription, customer: us_customer, plan:, billing_entity: nil) }
+      let!(:explicit_us_inherit_eu) do
+        create(:subscription, customer: eu_customer, plan:, billing_entity: us_entity)
+      end
+      let!(:explicit_eu_inherit_eu) do
+        create(:subscription, customer: eu_customer, plan:, billing_entity: eu_entity)
+      end
+
+      context "when filtering for the EU entity" do
+        let(:filters) { {billing_entity_ids: [eu_entity.id]} }
+
+        it "returns explicit and inherited matches, excludes mismatched explicit and inherited" do
+          expect(result).to be_success
+          expect(result.subscriptions).to match_array([
+            eu_subscription,
+            inherits_eu,
+            explicit_eu_inherit_eu
+          ])
+          expect(returned_ids).not_to include(inherits_us.id)
+          expect(returned_ids).not_to include(explicit_us_inherit_eu.id)
+        end
+
+        it "does not duplicate subscriptions whose explicit and inherited values both match" do
+          expect(returned_ids.count(explicit_eu_inherit_eu.id)).to eq(1)
+        end
+      end
+    end
   end
 
   context "with currency filter" do
-    let(:eur_plan) { create(:plan, organization:, amount_currency: "EUR") }
-    let(:usd_plan) { create(:plan, organization:, amount_currency: "USD") }
+    let_it_be(:eur_plan) { create(:plan, organization:, amount_currency: "EUR") }
+    let_it_be(:usd_plan) { create(:plan, organization:, amount_currency: "USD") }
     let(:eur_subscription) { create(:subscription, customer:, plan: eur_plan) }
     let(:usd_subscription) { create(:subscription, customer:, plan: usd_plan) }
     let(:subscription) { nil }

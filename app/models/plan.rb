@@ -47,12 +47,16 @@ class Plan < ApplicationRecord
     semiannual
   ].freeze
 
-  enum :interval, INTERVALS, validate: true
+  enum :interval, INTERVALS, validate: {allow_nil: true}
 
-  monetize :amount_cents
+  monetize :amount_cents, allow_nil: true
 
   validates :name, :code, presence: true
   validates :amount_currency, inclusion: {in: currency_list}
+  # A blank interval keeps the historical "value_is_invalid" error (the enum used
+  # to reject nil as an out-of-range value) rather than a "value_is_mandatory" one.
+  validates :interval, presence: {message: "value_is_invalid"}
+  validates :amount_cents, presence: true
   validates :pay_in_advance, inclusion: {in: [true, false]}
   validate :validate_code_unique
 
@@ -79,6 +83,8 @@ class Plan < ApplicationRecord
     !pay_in_advance
   end
 
+  # A legacy plan is frozen once it has subscriptions. Catalog plans live in
+  # their own table and freeze on contracts (CatalogPlan#attached_to_contracts?).
   def attached_to_subscriptions?
     subscriptions.exists?
   end
@@ -115,27 +121,6 @@ class Plan < ApplicationRecord
     amount_cents * 52
   end
 
-  def active_subscriptions_count
-    count = subscriptions.active.count
-    return count unless children
-
-    count + children.joins(:subscriptions).merge(Subscription.active).select("subscriptions.id").distinct.count
-  end
-
-  def customers_count
-    count = subscriptions.active.select(:customer_id).distinct.count
-    return count unless children
-
-    count + children.joins(:subscriptions).merge(Subscription.active).select(:customer_id).distinct.count
-  end
-
-  def draft_invoices_count
-    count = subscriptions.joins(:invoices).merge(Invoice.draft).select(:invoice_id).distinct.count
-    return count unless children
-
-    count + children.joins(:subscriptions).joins(:invoices).merge(Invoice.draft).select(:invoice_id).distinct.count
-  end
-
   private
 
   def validate_code_unique
@@ -153,17 +138,17 @@ end
 # Database name: primary
 #
 #  id                         :uuid             not null, primary key
-#  amount_cents               :bigint           not null
+#  amount_cents               :bigint
 #  amount_currency            :string           not null
 #  bill_charges_monthly       :boolean
 #  bill_fixed_charges_monthly :boolean          default(FALSE)
 #  code                       :string           not null
 #  deleted_at                 :datetime
 #  description                :string
-#  interval                   :integer          not null
+#  interval                   :integer
 #  invoice_display_name       :string
 #  name                       :string           not null
-#  pay_in_advance             :boolean          default(FALSE), not null
+#  pay_in_advance             :boolean          default(FALSE)
 #  pending_deletion           :boolean          default(FALSE), not null
 #  trial_period               :float
 #  created_at                 :datetime         not null
@@ -173,12 +158,14 @@ end
 #
 # Indexes
 #
-#  index_plans_on_bill_fixed_charges_monthly  (bill_fixed_charges_monthly) WHERE ((deleted_at IS NULL) AND (bill_fixed_charges_monthly IS TRUE))
-#  index_plans_on_created_at                  (created_at)
-#  index_plans_on_deleted_at                  (deleted_at)
-#  index_plans_on_organization_id             (organization_id)
-#  index_plans_on_organization_id_and_code    (organization_id,code) UNIQUE WHERE ((deleted_at IS NULL) AND (parent_id IS NULL))
-#  index_plans_on_parent_id                   (parent_id)
+#  index_plans_on_bill_fixed_charges_monthly         (bill_fixed_charges_monthly) WHERE ((deleted_at IS NULL) AND (bill_fixed_charges_monthly IS TRUE))
+#  index_plans_on_created_at                         (created_at)
+#  index_plans_on_deleted_at                         (deleted_at)
+#  index_plans_on_organization_id                    (organization_id)
+#  index_plans_on_organization_id_and_code           (organization_id,code) UNIQUE WHERE ((deleted_at IS NULL) AND (parent_id IS NULL))
+#  index_plans_on_organization_id_code_gin_trgm_ops  (organization_id,code) WHERE (deleted_at IS NULL) USING gin
+#  index_plans_on_organization_id_name_gin_trgm_ops  (organization_id,name) WHERE (deleted_at IS NULL) USING gin
+#  index_plans_on_parent_id                          (parent_id)
 #
 # Foreign Keys
 #

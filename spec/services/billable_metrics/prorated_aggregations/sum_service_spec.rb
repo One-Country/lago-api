@@ -5,19 +5,33 @@ require "rails_helper"
 RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: false do
   subject(:sum_service) do
     described_class.new(
-      event_store_class:,
-      charge:,
-      subscription:,
-      boundaries: {
-        from_datetime:,
-        to_datetime:,
-        charges_duration: 31
-      },
+      event_store:,
+      metered_item:,
+      billing_context:,
+      boundaries:,
       filters:
     )
   end
 
   let(:event_store_class) { Events::Stores::PostgresStore }
+  let(:metered_item) do
+    Fees::ChargeService::MeteredItem.from_charge(
+      charge:,
+      boundaries: BillingPeriodBoundaries.new(
+        from_datetime:,
+        to_datetime:,
+        charges_from_datetime: from_datetime,
+        charges_to_datetime: to_datetime,
+        charges_duration: 31,
+        timestamp: to_datetime
+      )
+    )
+  end
+  let(:boundaries) { {from_datetime:, to_datetime:, charges_duration: 31} }
+  let(:billing_context) { Billing::Context.from(subscription:) }
+  let(:event_store) do
+    event_store_class.new(code: billable_metric.code, billing_context:, boundaries:, filters:)
+  end
   let(:filters) { {event: pay_in_advance_event, grouped_by:, presentation_by:, matching_filters:, ignored_filters:} }
 
   let(:subscription) { create(:subscription, started_at: Time.zone.parse("2022-12-01 00:00:00")) }
@@ -90,6 +104,30 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
     expect(result.aggregation).to eq(9.64517) # 5 + (12*6/31) + (12*6/31)
     expect(result.pay_in_advance_aggregation).to be_zero
     expect(result.count).to eq(4)
+  end
+
+  context "with an event exactly on the period boundary" do
+    let(:boundary_event) do
+      create(
+        :event,
+        organization_id: organization.id,
+        code: billable_metric.code,
+        customer:,
+        subscription:,
+        timestamp: from_datetime,
+        properties: {total_count: 10}
+      )
+    end
+
+    before { boundary_event }
+
+    it "counts the boundary event once, not in both the persisted and current windows" do
+      result = sum_service.aggregate(options:)
+
+      # The event sits on `from_datetime`: it belongs to the current period only.
+      # 4 base events + 1 boundary event, counted once (a double-count would report 6).
+      expect(result.count).to eq(5)
+    end
   end
 
   context "with presentation group keys" do
@@ -205,6 +243,15 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
       expect(result.aggregation).to eq(29)
       expect(result.pay_in_advance_aggregation).to be_zero
       expect(result.count).to eq(4)
+    end
+
+    it "does not run the prorated queries" do
+      event_store = sum_service.send(:event_store)
+      allow(event_store).to receive(:prorated_sum).and_call_original
+
+      sum_service.aggregate(options:)
+
+      expect(event_store).not_to have_received(:prorated_sum)
     end
   end
 
@@ -381,6 +428,86 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
         expect(result.current_usage_units).to eq(5)
       end
     end
+
+    context "when the aggregated state turned negative after an upfront payment" do
+      let(:old_events) { nil }
+      let(:latest_events) do
+        create(
+          :event,
+          organization_id: organization.id,
+          code: billable_metric.code,
+          customer:,
+          subscription:,
+          timestamp: to_datetime - 3.days,
+          properties: {
+            total_count: -5
+          }
+        )
+      end
+
+      let(:cached_aggregation) do
+        create(
+          :cached_aggregation,
+          organization: billable_metric.organization,
+          charge:,
+          external_subscription_id: subscription.external_id,
+          event_transaction_id: latest_events.transaction_id,
+          timestamp: latest_events.timestamp,
+          current_aggregation: "-5",
+          max_aggregation: "20",
+          max_aggregation_with_proration: "8.5"
+        )
+      end
+
+      before { cached_aggregation }
+
+      it "does not inflate the aggregation with the negative units" do
+        result = sum_service.aggregate(options:)
+
+        expect(result.aggregation).to eq(8.5)
+        expect(result.current_usage_units).to eq(0)
+      end
+    end
+
+    context "when the aggregated state is negative from the start with nothing invoiced" do
+      let(:old_events) { nil }
+      let(:latest_events) do
+        create(
+          :event,
+          organization_id: organization.id,
+          code: billable_metric.code,
+          customer:,
+          subscription:,
+          timestamp: to_datetime - 3.days,
+          properties: {
+            total_count: -10
+          }
+        )
+      end
+
+      let(:cached_aggregation) do
+        create(
+          :cached_aggregation,
+          organization: billable_metric.organization,
+          charge:,
+          external_subscription_id: subscription.external_id,
+          event_transaction_id: latest_events.transaction_id,
+          timestamp: latest_events.timestamp,
+          current_aggregation: "-10",
+          max_aggregation: "-10",
+          max_aggregation_with_proration: "0"
+        )
+      end
+
+      before { cached_aggregation }
+
+      it "returns zero" do
+        result = sum_service.aggregate(options:)
+
+        expect(result.aggregation).to eq(0)
+        expect(result.current_usage_units).to eq(0)
+      end
+    end
   end
 
   context "when current usage context and charge is pay in advance and just upgraded" do
@@ -553,6 +680,19 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
       expect(result.pay_in_advance_aggregation).to eq(0.64517)
     end
 
+    context "with presentation group keys" do
+      let(:presentation_by) { ["cloud", "region"] }
+      let(:properties) { {"total_count" => 10, "cloud" => "aws", "region" => "eu"} }
+
+      it "assigns pay_in_advance_breakdowns based on the pay_in_advance event" do
+        result = sum_service.aggregate
+
+        expect(result.pay_in_advance_breakdowns).to eq([
+          {groups: {"cloud" => "aws", "region" => "eu"}, value: 10}
+        ])
+      end
+    end
+
     context "when current period aggregation is greater than period maximum" do
       let(:latest_events) do
         create(
@@ -671,6 +811,17 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
       expect(result.event_prorated_aggregation.map { |el| el.round(5) }).to eq([5, 2.32258, 2.32258])
     end
 
+    it "reuses the persisted prorated result instead of running a sum query" do
+      persisted_store = sum_service.send(:persisted_event_store_instance)
+      allow(persisted_store).to receive(:sum).and_call_original
+
+      sum_service.options = {}
+      result = sum_service.per_event_aggregation
+
+      expect(result.event_aggregation).to eq([5, 12, 12])
+      expect(persisted_store).not_to have_received(:sum)
+    end
+
     context "with grouped_by_values" do
       let(:old_event) { old_events.first }
       let(:latest_event) { latest_events.last }
@@ -684,8 +835,65 @@ RSpec.describe BillableMetrics::ProratedAggregations::SumService, transaction: f
         sum_service.options = {}
         result = sum_service.per_event_aggregation(grouped_by_values: {"scheme" => "visa"})
 
-        expect(result.event_aggregation).to eq([5, 12])
-        expect(result.event_prorated_aggregation.map { |el| el.round(5) }).to eq([5, 2.32258])
+        expect(result.event_aggregation).to eq([2.5, 12])
+        expect(result.event_prorated_aggregation.map { |el| el.round(5) }).to eq([2.5, 2.32258])
+      end
+    end
+
+    context "when aggregation is bypassed" do
+      subject(:sum_service) do
+        described_class.new(
+          event_store:,
+          metered_item:,
+          billing_context:,
+          boundaries:,
+          filters:,
+          bypass_aggregation: true
+        )
+      end
+
+      let(:billable_metric) do
+        create(
+          :billable_metric,
+          organization:,
+          aggregation_type: "sum_agg",
+          field_name: "total_count",
+          recurring: false
+        )
+      end
+
+      it "returns empty aggregations without querying the event store" do
+        event_store = sum_service.__send__(:event_store)
+        allow(event_store).to receive(:prorated_events_values).and_call_original
+        allow(event_store).to receive(:events_values).and_call_original
+
+        result = sum_service.per_event_aggregation
+
+        expect(result.event_aggregation).to eq([])
+        expect(result.event_prorated_aggregation).to eq([])
+        expect(event_store).not_to have_received(:prorated_events_values)
+        expect(event_store).not_to have_received(:events_values)
+      end
+    end
+
+    context "when aggregation is bypassed and metric is recurring" do
+      subject(:sum_service) do
+        described_class.new(
+          event_store:,
+          metered_item:,
+          billing_context:,
+          boundaries:,
+          filters:,
+          bypass_aggregation: true
+        )
+      end
+
+      it "ignores the bypass and aggregates per events" do
+        sum_service.options = {}
+        result = sum_service.per_event_aggregation
+
+        expect(result.event_aggregation).to eq([5, 12, 12])
+        expect(result.event_prorated_aggregation.map { |el| el.round(5) }).to eq([5, 2.32258, 2.32258])
       end
     end
   end

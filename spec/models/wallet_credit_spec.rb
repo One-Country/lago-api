@@ -5,6 +5,9 @@ require "rails_helper"
 RSpec.describe WalletCredit do
   subject { described_class.new(wallet:, credit_amount:, invoiceable:) }
 
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
+
   let(:wallet) { create(:wallet, rate_amount:, currency:) }
   let(:currency) { "EUR" }
   let(:credit_amount) { 1000 }
@@ -45,6 +48,24 @@ RSpec.describe WalletCredit do
     describe "#amount_cents" do
       it "returns the amount cents" do
         expect(subject.amount_cents).to eq(103)
+      end
+    end
+  end
+
+  context "with an amount in cents" do
+    subject { described_class.new(wallet:, credit_amount: BigDecimal("0.00333"), invoiceable: false, amount_cents: 1000) }
+
+    let(:rate_amount) { 3000 }
+
+    describe "#amount" do
+      it "returns the given amount" do
+        expect(subject.amount).to eq(10)
+      end
+    end
+
+    describe "#credit_amount" do
+      it "keeps the credit_amount" do
+        expect(subject.credit_amount).to eq(BigDecimal("0.00333"))
       end
     end
   end
@@ -92,6 +113,56 @@ RSpec.describe WalletCredit do
         it "returns the amount cents" do
           expect(subject.amount_cents).to eq(103)
         end
+      end
+    end
+
+    context "when amount cents ends in half a cent" do
+      let(:amount_cents) { BigDecimal("1234.5") }
+
+      describe "#credit_amount" do
+        it "returns the rounded credit_amount" do
+          expect(subject.credit_amount).to eq(12.35)
+        end
+      end
+
+      describe "#amount" do
+        it "rounds the amount up" do
+          expect(subject.amount).to eq(12.35)
+        end
+      end
+    end
+  end
+
+  describe ".rounds_to_zero?" do
+    subject { described_class.rounds_to_zero?(wallet:, credit_amount:) }
+
+    let(:rate_amount) { 0.01 }
+
+    context "when the credit amount produces a zero monetary value" do
+      let(:credit_amount) { "0.4" }
+
+      it { is_expected.to be(true) }
+    end
+
+    context "when the credit amount produces a non-zero monetary value" do
+      let(:credit_amount) { "1.0" }
+
+      it { is_expected.to be(false) }
+    end
+
+    context "when the credit amount is strictly zero" do
+      let(:credit_amount) { "0.0" }
+
+      it { is_expected.to be(false) }
+    end
+
+    context "when the wallet uses a three-decimal currency" do
+      let(:currency) { "KWD" }
+      let(:rate_amount) { 0.001 }
+      let(:credit_amount) { "1.0" }
+
+      it "keeps a sub-cent but non-zero value as not rounding to zero" do
+        expect(subject).to be(false)
       end
     end
   end

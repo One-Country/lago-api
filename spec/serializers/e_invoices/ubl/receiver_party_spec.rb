@@ -10,7 +10,11 @@ RSpec.describe EInvoices::Ubl::ReceiverParty do
   end
 
   let(:resource) { create(:payment, customer:) }
-  let(:customer) do
+  let(:root) { "//cac:ReceiverParty" }
+
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:invoice) { create_default(:invoice) }
+  let_it_be(:customer, refind: true) do
     create(
       :customer,
       name: "Customer Jr",
@@ -21,8 +25,6 @@ RSpec.describe EInvoices::Ubl::ReceiverParty do
       country: "BR"
     )
   end
-
-  let(:root) { "//cac:ReceiverParty" }
 
   before { resource }
 
@@ -43,6 +45,14 @@ RSpec.describe EInvoices::Ubl::ReceiverParty do
       it "expects to have street name" do
         expect(subject).to contains_xml_node("#{xpath}/cbc:StreetName").with_value(customer.address_line1)
         expect(subject).to contains_xml_node("#{xpath}/cbc:AdditionalStreetName").with_value(customer.address_line2)
+      end
+
+      context "when address_line2 is blank" do
+        before { customer.update!(address_line2: nil) }
+
+        it "omits AdditionalStreetName" do
+          expect(subject).not_to contains_xml_node("#{xpath}/cbc:AdditionalStreetName")
+        end
       end
 
       it "expects to have city" do

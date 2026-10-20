@@ -5,7 +5,8 @@ require "rails_helper"
 RSpec.describe ChargeFilters::EventMatchingService do
   subject(:service_result) { described_class.call(charge:, event:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:billable_metric) { create(:billable_metric, organization:) }
 
   let(:event_properties) do
     {
@@ -16,7 +17,6 @@ RSpec.describe ChargeFilters::EventMatchingService do
       card_number: 2
     }
   end
-
   let(:event) do
     create(
       :event,
@@ -25,11 +25,7 @@ RSpec.describe ChargeFilters::EventMatchingService do
       properties: event_properties
     )
   end
-
-  let(:billable_metric) { create(:billable_metric, organization:) }
-
   let(:charge) { create(:standard_charge, billable_metric:) }
-
   let(:payment_method) do
     create(:billable_metric_filter, billable_metric:, key: "payment_method", values: %i[card virtual_card transfer])
   end
@@ -37,7 +33,6 @@ RSpec.describe ChargeFilters::EventMatchingService do
   let(:scheme) { create(:billable_metric_filter, billable_metric:, key: "scheme", values: %i[visa mastercard]) }
   let(:card_type) { create(:billable_metric_filter, billable_metric:, key: "card_type", values: %i[credit debit]) }
   let(:card_number) { create(:billable_metric_filter, billable_metric:, key: "card_number", values: %i[1 2 3]) }
-
   let(:filter1) { create(:charge_filter, charge:) }
   let(:filter1_values) do
     [
@@ -51,7 +46,6 @@ RSpec.describe ChargeFilters::EventMatchingService do
       )
     ]
   end
-
   let(:filter2) { create(:charge_filter, charge:) }
   let(:filter2_values) do
     [
@@ -103,6 +97,23 @@ RSpec.describe ChargeFilters::EventMatchingService do
 
     it "returns the filter matching the most properties" do
       expect(service_result.charge_filter).to eq(filter2)
+    end
+
+    context "when the event value is outside the billable metric filter defined values" do
+      let(:event_properties) do
+        {
+          payment_method: "card",
+          card_location: "domestic",
+          scheme: "amex", # not part of the scheme defined values (visa, mastercard)
+          card_type: "credit",
+          card_number: 2
+        }
+      end
+
+      it "does not match the ALL_FILTER_VALUES filter" do
+        expect(service_result.charge_filter).to be_nil
+        expect(service_result.matching_charge_filters).to be_empty
+      end
     end
   end
 end

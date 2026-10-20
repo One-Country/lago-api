@@ -3,7 +3,7 @@
 require "rails_helper"
 
 RSpec.describe Api::V1::PaymentsController do
-  let(:organization) { create(:organization) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
 
   describe "POST /api/v1/payments" do
     subject do
@@ -14,7 +14,7 @@ RSpec.describe Api::V1::PaymentsController do
       )
     end
 
-    let(:customer) { create(:customer, organization:) }
+    let_it_be(:customer) { create_default(:customer, organization:) }
     let(:invoice) { create(:invoice, organization:, customer:) }
     let(:params) do
       {
@@ -29,7 +29,7 @@ RSpec.describe Api::V1::PaymentsController do
     context "when all parameters are valid" do
       before do
         allow(Payments::ManualCreateService).to receive(:call).and_return(
-          BaseService::Result.new.tap { |r| r.payment = payment }
+          Payments::ManualCreateService::Result.new.tap { |r| r.payment = payment }
         )
       end
 
@@ -120,7 +120,7 @@ RSpec.describe Api::V1::PaymentsController do
   describe "GET /api/v1/payments/:id" do
     subject { get_with_token(organization, "/api/v1/payments/#{id}") }
 
-    let(:customer) { create(:customer, organization:) }
+    let_it_be(:customer) { create_default(:customer, organization:) }
     let(:invoice) { create(:invoice, customer:, organization:) }
     let(:payment) { create(:payment, payable: invoice) }
 

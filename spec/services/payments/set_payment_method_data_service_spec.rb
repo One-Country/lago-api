@@ -6,7 +6,8 @@ RSpec.describe Payments::SetPaymentMethodDataService do
   subject(:service) { described_class.new(payment:, provider_payment_method_id:) }
 
   let(:provider_payment_method_id) { "pm_1R2DFsQ8iJWBZFaMw3LLbR0r" }
-  let(:organization) { create(:organization) }
+
+  let_it_be(:organization) { create_default(:organization) }
 
   describe "#call" do
     context "with Stripe" do
@@ -26,8 +27,7 @@ RSpec.describe Payments::SetPaymentMethodDataService do
         expect(result.payment&.payment_method&.details).to be_nil
       end
 
-      context "with multiple payment methods enabled" do
-        let(:organization) { create(:organization, feature_flags: ["multiple_payment_methods"]) }
+      context "when the payment has a payment method" do
         let(:payment_method) { create(:payment_method, organization:) }
         let(:payment) { create(:payment, payment_provider: create(:stripe_provider), organization:, payment_method:) }
 

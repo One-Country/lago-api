@@ -3,17 +3,34 @@
 require "rails_helper"
 
 RSpec.describe Invoices::CreatePayInAdvanceChargeJob do
+  before_all do
+    create_default(:organization)
+    create_default(:billable_metric)
+    create_default(:plan)
+    create_default(:customer)
+  end
+
   describe "#perform" do
-    let(:charge) { create(:standard_charge, :pay_in_advance, invoiceable: true) }
-    let(:event) { create(:event) }
+    subject(:perform_job) { described_class.perform_now(charge:, event:, timestamp:) }
+
+    let(:organization) { create(:organization) }
+    let(:subscription) { create(:subscription, organization:) }
+    let(:charge) do
+      create(:standard_charge, :pay_in_advance, organization:, plan: subscription.plan, invoiceable: true)
+    end
+    let(:event) { create(:event, organization:, external_subscription_id: subscription.external_id) }
     let(:timestamp) { Time.current.to_i }
 
     let(:invoice) { nil }
-    let(:result) { BaseService::Result.new }
+    let(:result) { Invoices::CreatePayInAdvanceChargeService::Result.new }
 
     before do
       allow(Invoices::CreatePayInAdvanceChargeService).to receive(:call)
-        .with(charge:, event:, timestamp:)
+        .with(
+          metered_item: instance_of(Fees::ChargeService::MeteredItem),
+          billing_context: instance_of(Billing::Context),
+          timestamp:
+        )
         .and_return(result)
     end
 
@@ -23,9 +40,53 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeJob do
       expect(Invoices::CreatePayInAdvanceChargeService).to have_received(:call)
     end
 
+    context "when the service returns a duplicate fee failure" do
+      let(:field) { :pay_in_advance_event_transaction_id }
+      let(:error_code) { "pay_in_advance_fee_already_exists" }
+      let(:result) { Invoices::CreatePayInAdvanceChargeService::Result.new.single_validation_failure!(field:, error_code:) }
+
+      it "absorbs the duplicate without retrying" do
+        expect { perform_job }.not_to raise_error
+        expect(Invoices::CreatePayInAdvanceChargeService).to have_received(:call).once
+      end
+
+      context "when the transaction has another validation error" do
+        let(:error_code) { "invalid" }
+
+        it "raises the failure" do
+          expect { perform_job }.to raise_error(BaseService::FailedResult)
+        end
+      end
+
+      context "when taxes fail" do
+        let(:field) { :tax_error }
+        let(:error_code) { "tax_provider_error" }
+
+        it "absorbs the tax failure" do
+          expect { perform_job }.not_to raise_error
+        end
+      end
+    end
+
+    context "when the event has no billing context" do
+      let(:event) do
+        create(:event, organization:, external_subscription_id: "unknown-#{SecureRandom.uuid}")
+      end
+
+      before { allow(Rails.logger).to receive(:error) }
+
+      it "skips the service call and logs the event" do
+        described_class.perform_now(charge:, event:, timestamp:)
+
+        expect(Invoices::CreatePayInAdvanceChargeService).not_to have_received(:call)
+        expect(Rails.logger).to have_received(:error)
+          .with(/no billing context for event.*charge_id=#{charge.id}/)
+      end
+    end
+
     context "when result is a failure" do
       let(:result) do
-        BaseService::Result.new.single_validation_failure!(error_code: "error")
+        Invoices::CreatePayInAdvanceChargeService::Result.new.single_validation_failure!(error_code: "error")
       end
 
       it "raises an error" do
@@ -66,7 +127,7 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeJob do
     describe "retry_on" do
       [
         [Sequenced::SequenceError.new("Sequenced::SequenceError"), 15],
-        [Customers::FailedToAcquireLock.new("customer-1-prepaid_credit"), 25],
+        [BaseLockService::FailedToAcquireLock.new("customer-1-prepaid_credit"), 25],
         [ActiveRecord::StaleObjectError.new("Attempted to update a stale object: Wallet."), 25],
         [BaseService::ThrottlingError.new(provider_name: "Stripe"), 25]
       ].each do |error, attempts|

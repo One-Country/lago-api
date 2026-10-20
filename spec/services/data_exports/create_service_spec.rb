@@ -9,9 +9,9 @@ RSpec.describe DataExports::CreateService do
 
   include_context "with mocked security logger"
 
-  let(:organization) { create(:organization) }
-  let(:user) { create(:user) }
-  let(:membership) { create(:membership, user:, organization:) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:user) { create(:user) }
+  let_it_be(:membership) { create(:membership, user:, organization:) }
 
   let(:format) { "csv" }
   let(:resource_type) { "invoices" }
@@ -24,10 +24,7 @@ RSpec.describe DataExports::CreateService do
     }
   end
 
-  before do
-    membership
-    allow(DataExports::ExportResourcesJob).to receive(:perform_later)
-  end
+  before { membership }
 
   it "creates a new data export record" do
     expect(result).to be_success
@@ -46,7 +43,7 @@ RSpec.describe DataExports::CreateService do
     data_export = result.data_export
 
     expect(DataExports::ExportResourcesJob)
-      .to have_received(:perform_later)
+      .to have_been_enqueued
       .with(data_export)
   end
 

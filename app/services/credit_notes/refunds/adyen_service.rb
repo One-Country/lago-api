@@ -3,6 +3,8 @@
 module CreditNotes
   module Refunds
     class AdyenService < BaseService
+      Result = BaseResult[:credit_note, :refund]
+
       include Customers::PaymentProviderFinder
 
       def initialize(credit_note = nil)
@@ -20,9 +22,11 @@ module CreditNotes
         refund = Refund.new(
           organization_id: credit_note.organization_id,
           credit_note:,
+          refundable: credit_note,
+          reason: :credit_note,
           payment:,
           payment_provider: payment.payment_provider,
-          payment_provider_customer: payment_provider_customer(customer),
+          payment_provider_customer: payment_provider_customer(payment),
           amount_cents: adyen_result.response.dig("amount", "value"),
           amount_currency: adyen_result.response.dig("amount", "currency"),
           status: "pending",
@@ -51,7 +55,7 @@ module CreditNotes
 
         if status.to_sym == :failed
           deliver_error_webhook(message: "Payment refund failed", code: nil)
-          Utils::ActivityLog.produce(credit_note, "credit_note.refund_failure")
+          Utils::ActivityLog.produce(credit_note, "credit_note.provider_refund_failure")
           result.service_failure!(code: "refund_failed", message: "Refund failed to perform")
         end
 
@@ -81,7 +85,7 @@ module CreditNotes
       end
 
       def payment
-        @payment ||= credit_note.invoice.payments.order(created_at: :desc).first
+        @payment ||= invoice.refundable_payment
       end
 
       def adyen_api_key
@@ -96,7 +100,7 @@ module CreditNotes
       rescue Adyen::AdyenError => e
         deliver_error_webhook(message: e.msg, code: e.code)
         update_credit_note_status(:failed)
-        Utils::ActivityLog.produce(credit_note, "credit_note.refund_failure")
+        Utils::ActivityLog.produce(credit_note, "credit_note.provider_refund_failure")
 
         raise
       end
@@ -114,9 +118,9 @@ module CreditNotes
 
       def deliver_error_webhook(message:, code:)
         SendWebhookJob.perform_later(
-          "credit_note.provider_refund_failure",
+          "credit_note.refund_failure",
           credit_note,
-          provider_customer_id: payment_provider_customer(customer)&.provider_customer_id,
+          provider_customer_id: payment_provider_customer(payment)&.provider_customer_id,
           provider_error: {
             message:,
             error_code: code

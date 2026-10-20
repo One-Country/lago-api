@@ -7,8 +7,8 @@ RSpec.describe PaymentProviders::DestroyService do
 
   include_context "with mocked security logger"
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:membership) { create(:membership) }
 
   let(:payment_provider) { create(:stripe_provider, organization:) }
 
@@ -22,6 +22,29 @@ RSpec.describe PaymentProviders::DestroyService do
 
     it_behaves_like "produces a security log", "integration.deleted" do
       before { destroy_service.call }
+    end
+
+    context "with attached payment provider customers" do
+      let_it_be(:customer) { create(:customer, organization:) }
+      let(:payment_provider_customer) { create(:stripe_customer, customer:, organization:, payment_provider:) }
+
+      before { payment_provider_customer }
+
+      it "soft deletes the payment provider customers" do
+        expect { destroy_service.call }
+          .to change { payment_provider_customer.reload.discarded? }.from(false).to(true)
+      end
+
+      it "keeps the payment provider association on the customers" do
+        destroy_service.call
+
+        expect(payment_provider_customer.reload.payment_provider_id).to eq(payment_provider.id)
+      end
+
+      it "bumps updated_at on the payment provider customers" do
+        expect { destroy_service.call }
+          .to change { payment_provider_customer.reload.updated_at }
+      end
     end
 
     context "when payment provider is not found" do

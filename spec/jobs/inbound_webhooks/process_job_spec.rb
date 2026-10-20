@@ -3,10 +3,14 @@
 require "rails_helper"
 
 RSpec.describe InboundWebhooks::ProcessJob do
+  before_all do
+    create_default(:organization)
+  end
+
   subject(:process_job) { described_class }
 
   let(:inbound_webhook) { create :inbound_webhook }
-  let(:result) { BaseService::Result.new }
+  let(:result) { InboundWebhooks::ProcessService::Result.new }
 
   before do
     allow(InboundWebhooks::ProcessService).to receive(:call).and_return(result)
@@ -22,7 +26,7 @@ RSpec.describe InboundWebhooks::ProcessJob do
 
   context "when result is a failure" do
     let(:result) do
-      BaseService::Result.new.service_failure!(code: "error", message: "error message")
+      InboundWebhooks::ProcessService::Result.new.service_failure!(code: "error", message: "error message")
     end
 
     it "raises an error" do

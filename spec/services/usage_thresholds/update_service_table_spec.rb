@@ -5,12 +5,8 @@ require "rails_helper"
 RSpec.describe UsageThresholds::UpdateService, premium: true do
   subject(:result) { described_class.call(model:, usage_thresholds_params:, partial:) }
 
-  let(:organization) { create(:organization, premium_integrations: ["progressive_billing"]) }
+  let_it_be(:organization) { create(:organization, premium_integrations: ["progressive_billing"]) }
   let(:model) { create(:plan, organization:) }
-
-  before do
-    allow(LifetimeUsages::FlagRefreshFromPlanUpdateJob).to receive(:perform_after_commit)
-  end
 
   # Helper to build threshold attributes for comparison
   def threshold_attrs(thresholds)

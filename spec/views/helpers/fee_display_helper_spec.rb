@@ -5,6 +5,133 @@ require "rails_helper"
 RSpec.describe FeeDisplayHelper do
   subject(:helper) { described_class }
 
+  describe ".fee_title" do
+    subject { helper.fee_title(fee) }
+
+    let(:charge) { create(:standard_charge, invoice_display_name: "Compute") }
+
+    context "when grouped_by is empty and there is no charge filter" do
+      let(:fee) { create(:fee, charge:, fee_type: "charge", grouped_by: {}, invoice_display_name: nil, total_aggregated_units: 0) }
+
+      it "returns invoice_name" do
+        expect(subject).to eq("Compute")
+      end
+    end
+
+    context "when grouped_by is present and there is no charge filter" do
+      let(:fee) { create(:fee, charge:, fee_type: "charge", grouped_by: {"region" => "eu"}, invoice_display_name: nil, total_aggregated_units: 0) }
+
+      it "returns invoice_name appended with the grouped_by values" do
+        expect(subject).to eq("Compute • eu")
+      end
+    end
+
+    context "when charge filter is present and grouped_by is empty" do
+      let(:charge_filter) { create(:charge_filter, charge:, invoice_display_name: "EU Premium") }
+      let(:fee) { create(:fee, charge:, fee_type: "charge", grouped_by: {}, charge_filter:, invoice_display_name: nil, total_aggregated_units: 0) }
+
+      it "returns invoice_name appended with the filter display name" do
+        expect(subject).to eq("Compute • EU Premium")
+      end
+    end
+
+    context "when charge filter is present and grouped_by is present" do
+      let(:charge_filter) { create(:charge_filter, charge:, invoice_display_name: "EU Premium") }
+      let(:fee) { create(:fee, charge:, fee_type: "charge", grouped_by: {"region" => "eu"}, charge_filter:, invoice_display_name: nil, total_aggregated_units: 0) }
+
+      it "returns invoice_name appended with grouped_by values and filter display name" do
+        expect(subject).to eq("Compute • eu • EU Premium")
+      end
+    end
+
+    context "when product filter is present" do
+      let(:product) { create(:product, organization: charge.organization, name: "Compute") }
+      let(:product_filter) { create(:product_filter, product:, invoice_display_name: "EU Premium") }
+      let(:fee) do
+        build(
+          :fee,
+          charge: nil,
+          fee_type: "product",
+          invoiceable: product,
+          subscription: nil,
+          product_filter:,
+          grouped_by: {},
+          invoice_display_name: nil
+        )
+      end
+
+      it "returns invoice_name appended with the product filter display name" do
+        expect(subject).to eq("Compute • EU Premium")
+      end
+    end
+  end
+
+  describe ".should_display_subscription_fee?" do
+    subject { helper.should_display_subscription_fee?(invoice_subscription) }
+
+    let(:invoice) { create(:invoice) }
+    let(:subscription) { create(:subscription) }
+
+    let(:invoice_subscription) do
+      create(:invoice_subscription, invoice:, subscription:)
+    end
+
+    context "when invoice_subscription is blank" do
+      let(:invoice_subscription) { nil }
+
+      it { is_expected.to be false }
+    end
+
+    context "when the invoice is progressive billing" do
+      before { allow(invoice).to receive(:progressive_billing?).and_return(true) }
+
+      it { is_expected.to be false }
+    end
+
+    context "when there is no charge fee and no fixed charge fee" do
+      before do
+        create(:fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 0)
+      end
+
+      it "displays the subscription fee even when it is zero" do
+        expect(subject).to be true
+      end
+    end
+
+    context "when there is a positive usage charge fee and a zero subscription fee" do
+      before do
+        create(:charge_fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 500)
+        create(:fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 0)
+      end
+
+      it "hides the zero subscription fee" do
+        expect(subject).to be false
+      end
+    end
+
+    context "when there is a positive fixed charge fee and a zero subscription fee" do
+      before do
+        create(:fixed_charge_fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 500)
+        create(:fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 0)
+      end
+
+      it "hides the zero subscription fee" do
+        expect(subject).to be false
+      end
+    end
+
+    context "when there is a positive fixed charge fee and a positive subscription fee" do
+      before do
+        create(:fixed_charge_fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 500)
+        create(:fee, subscription_id: subscription.id, invoice_id: invoice.id, amount_cents: 300)
+      end
+
+      it "displays the subscription fee" do
+        expect(subject).to be true
+      end
+    end
+  end
+
   describe ".grouped_by_display" do
     let(:charge) { create(:standard_charge, properties:) }
     let(:fee) { create(:fee, charge:, fee_type: "charge", grouped_by:, total_aggregated_units: 10) }
@@ -94,6 +221,24 @@ RSpec.describe FeeDisplayHelper do
       it "returns the amount with the pricing unit's short name" do
         expect(subject).to eq "10.53 #{pricing_unit_usage.short_name}"
       end
+    end
+  end
+
+  describe ".format_percentage_rate" do
+    it "rounds float artifacts and removes trailing zeros" do
+      expect(helper.format_percentage_rate("0.8999999999999999")).to eq("0.9%")
+      expect(helper.format_percentage_rate("0.7000000000000001")).to eq("0.7%")
+      expect(helper.format_percentage_rate("5.55")).to eq("5.55%")
+      expect(helper.format_percentage_rate("5")).to eq("5%")
+      expect(helper.format_percentage_rate("100")).to eq("100%")
+      expect(helper.format_percentage_rate("0.001")).to eq("0.001%")
+      expect(helper.format_percentage_rate("2.125")).to eq("2.125%")
+      expect(helper.format_percentage_rate("1.0")).to eq("1%")
+      expect(helper.format_percentage_rate("0.0000004")).to eq("0.0000004%")
+    end
+
+    it "returns nil when the rate is blank" do
+      expect(helper.format_percentage_rate("")).to be_nil
     end
   end
 

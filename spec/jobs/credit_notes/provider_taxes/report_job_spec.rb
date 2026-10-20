@@ -3,11 +3,15 @@
 require "rails_helper"
 
 RSpec.describe CreditNotes::ProviderTaxes::ReportJob do
-  let(:organization) { create(:organization) }
-  let(:credit_note) { create(:credit_note, customer:) }
-  let(:customer) { create(:customer, organization:) }
+  before_all do
+    create_default(:invoice)
+  end
 
-  let(:result) { BaseService::Result.new }
+  let_it_be(:organization) { create(:organization) }
+  let(:credit_note) { create(:credit_note, customer:) }
+  let(:customer) { create_default(:customer, organization:) }
+
+  let(:result) { CreditNotes::ProviderTaxes::ReportService::Result.new }
 
   before do
     allow(CreditNotes::ProviderTaxes::ReportService).to receive(:call)

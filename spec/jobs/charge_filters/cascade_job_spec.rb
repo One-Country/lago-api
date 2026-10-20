@@ -3,6 +3,12 @@
 require "rails_helper"
 
 RSpec.describe ChargeFilters::CascadeJob do
+  before_all do
+    create_default(:organization)
+    create_default(:billable_metric)
+    create_default(:plan)
+  end
+
   let(:charge) { create(:standard_charge) }
   let(:filter_values) { {"region" => ["us"]} }
   let(:old_properties) { {"amount" => "10"} }
@@ -22,7 +28,16 @@ RSpec.describe ChargeFilters::CascadeJob do
       filter_values:,
       old_properties:,
       new_properties:,
-      invoice_display_name:
+      invoice_display_name:,
+      parent_code: nil
+    )
+  end
+
+  it "passes the parent code through when it is given" do
+    described_class.perform_now(charge.id, "create", filter_values, nil, new_properties, invoice_display_name, "a-parent-code")
+
+    expect(ChargeFilters::CascadeService).to have_received(:call!).with(
+      hash_including(parent_code: "a-parent-code")
     )
   end
 

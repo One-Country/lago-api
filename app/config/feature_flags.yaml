@@ -1,35 +1,67 @@
-multiple_payment_methods:
-  description: "Allow multiple payment methods per customer"
-  owners: ["@lovrocolic", "@mariohd"]
-
-non_persistable_charge_cache_optimization:
-  description: "Optimize current usage cache by not storing non-persistable fees (zero units/amounts/events)"
-  owners: ["@groyoh"]
-
 postgres_enriched_events:
   description: "Turn on events pre-enrichement for organizations using the PG event store"
-  owners: ["@vincent-pochet"]
-
-enriched_events_aggregation:
-  description: "Use the enriched events store for aggregation queries in ClickHouse"
   owners: ["@vincent-pochet"]
 
 wallet_traceability:
   description: "Enable wallet traceability on newly created wallets"
   owners: ["@groyoh", "@D1353L"]
 
-multi_currency:
-  description: "Allow customers to have billing objects in multiple currencies"
-  owners: ["@feliperodrigues", "@mariohd", "@lovrocolic"]
-
-payment_gated_subscriptions:
-  description: "Enable payment-gated subscription activation rules"
-  owners: ["@osmarluz", "@ancorcruz"]
-
-multi_entity_billing:
-  description: "Allow customers to have billing objects across multiple billing entities"
-  owners: ["@lovrocolic", "@feliperodrigues", "@mariohd"]
-
 order_forms:
   description: "Enable quotes, order forms and orders"
   owners: ["@murparreira", "@toommz", "@rinasergeeva"]
+
+stripe_shared_payment_token:
+  description: "Use Stripe Shared Payment Token for agent-initiated payments when no other payment method is attached"
+  owners: ["@ancorcruz"]
+
+fixed_charge_usage_delta_migration:
+  description: "Count fees from discarded recurring usage charges as already-paid units when computing pay-in-advance fixed charge deltas (temporary bridge for usage-to-fixed-charge migrations)"
+  owners: ["@osmarluz"]
+
+multi_connection:
+  description: "Allow organizations to configure multiple connections of the same type per customer"
+  owners: ["@lovrocolic", "@mariohd"]
+
+product_catalog:
+  description: "Use the product catalog (billing v2): product_categories, products, rate cards and plan rate phases"
+  owners: ["@rsempe"]
+
+realtime_usage:
+  description: "Serve count and sum current usage from the pre-aggregated ClickHouse usage buckets instead of aggregating raw events"
+  owners: ["@vincent-pochet"]
+
+charge_filters_single_scan:
+  description: "Aggregate every filter of a count or sum charge in one ClickHouse read instead of one read per filter"
+  owners: ["@jdenquin"]
+
+skip_credit_invoice_auto_payment_delay:
+  description: "Trigger the auto-payment of credit invoices (wallet top-ups) immediately instead of delaying it behind a possible hosted checkout payment"
+  owners: ["@brunomiguelpinto"]
+
+account_tree:
+  description: "Enable the account tree - hierarchy based attributed usage below the customer"
+  owners: ["@lovrocolic"]
+
+x402_payments:
+  description: "Enable x402 agentic payments: Coinbase CDP connections, gate checks, credit purchases and invoice payments settled in USDC"
+  owners: ["@osmarluz"]
+
+x402_reservation_counter_disabled:
+  description: "Switch off the x402 reservation counter for an organization; the gate check then applies the static per-call floor. Operated by Lago"
+  owners: ["@osmarluz"]
+
+usage_prefilter_short_cache:
+  description: "Reuse the ClickHouse pre-filter result of the current usage API for 15 seconds, bounding how often polling clients scan the events of a subscription"
+  owners: ["@jdenquin"]
+
+usage_prefilter_incremental:
+  description: "Keep the current usage pre-filter result of each subscription and only read the events ingested since, instead of every event of the billing period"
+  owners: ["@jdenquin"]
+
+incremental_charge_cache:
+  description: "Keep the count, sum, max and latest totals of past events between current usage computations and only read the events of the last half hour, instead of every event of the billing period"
+  owners: ["@jdenquin"]
+
+sso_cross_organization_sessions:
+  description: "Keep the former Okta and Entra ID scope between flagged organizations: each accepts SSO sessions from the others' integrations, and its own integration signs in users who are not members yet, even when it does not allow the login method itself"
+  owners: ["@jdenquin", "@vincent-pochet"]

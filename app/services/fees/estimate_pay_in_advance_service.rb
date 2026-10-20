@@ -2,6 +2,8 @@
 
 module Fees
   class EstimatePayInAdvanceService < BaseService
+    Result = BaseResult[:fees]
+
     def initialize(organization:, params:)
       @organization = organization
       # NOTE: validation is shared with event creation and is expecting a transaction_id
@@ -12,7 +14,10 @@ module Fees
 
     def call
       validation_result = Events::ValidateCreationService.call(organization:, event_params:, customer:, subscriptions:)
-      return validation_result unless validation_result.success?
+      unless validation_result.success?
+        result.fail_with_error!(validation_result.error)
+        return result
+      end
 
       if charges.none?
         return result.single_validation_failure!(field: :code, error_code: "does_not_match_an_instant_charge")
@@ -95,7 +100,35 @@ module Fees
     end
 
     def estimated_charge_fees(charge)
-      Fees::CreatePayInAdvanceService.call!(charge:, event:, estimate: true).fees
+      metered_item = Fees::ChargeService::MeteredItem.from_charge(
+        charge:,
+        boundaries:,
+        event:
+      )
+      Fees::CreatePayInAdvanceService.call!(
+        metered_item:,
+        billing_context: Billing::Context.from(subscription: subscriptions.first),
+        estimate: true
+      ).fees
+    end
+
+    def boundaries
+      @boundaries ||= begin
+        date_service = Subscriptions::DatesService.new_instance(
+          subscriptions.first,
+          event.timestamp,
+          current_usage: true
+        )
+
+        BillingPeriodBoundaries.new(
+          from_datetime: date_service.from_datetime,
+          to_datetime: date_service.to_datetime,
+          charges_from_datetime: date_service.charges_from_datetime,
+          charges_to_datetime: date_service.charges_to_datetime,
+          charges_duration: date_service.charges_duration_in_days,
+          timestamp: event.timestamp
+        )
+      end
     end
 
     def apply_taxes(fees)

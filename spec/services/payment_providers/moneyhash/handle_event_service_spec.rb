@@ -5,10 +5,11 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
   subject(:event_service) { described_class.new(organization:, event_json:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create(:organization) }
   let(:moneyhash_provider) { create(:moneyhash_provider, organization:) }
-  let(:customer) { create(:customer, organization:) }
   let(:moneyhash_customer) { create(:moneyhash_customer, customer:) }
+
+  let_it_be(:customer) { create(:customer, organization:) }
 
   # Intent
   # handle event - intent.processed <-
@@ -110,6 +111,42 @@ RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
     end
   end
 
+  describe "amount_cents handling in metadata" do
+    let(:service_result) { Invoices::Payments::MoneyhashService::RESULTS.fetch(:update_payment_status).new }
+
+    before do
+      allow(Invoices::Payments::MoneyhashService).to receive(:call).and_return(service_result)
+    end
+
+    context "when handling an intent event with a scalar amount in major units" do
+      let(:event_json) { JSON.parse(File.read(Rails.root.join("spec/fixtures/moneyhash/intent.processed.json"))) }
+
+      it "passes amount_cents converted to minor units as a dedicated kwarg" do
+        event_service.call
+
+        expect(Invoices::Payments::MoneyhashService).to have_received(:call).with(
+          :update_payment_status, hash_including(amount_cents: 500)
+        )
+      end
+    end
+
+    context "when handling a transaction event whose amount is a hash with major-unit value" do
+      let(:event_json) { JSON.parse(File.read(Rails.root.join("spec/fixtures/moneyhash/transaction.purchase.successful.json"))) }
+
+      it "extracts the value from the amount hash and converts to cents" do
+        event_service.call
+
+        expect(Invoices::Payments::MoneyhashService).to have_received(:call).with(
+          :update_payment_status, hash_including(amount_cents: 710)
+        )
+      end
+
+      it "does not raise when amount is a hash rather than a scalar" do
+        expect { event_service.call }.not_to raise_error
+      end
+    end
+  end
+
   # Card Token
   # handle event - card_token.created <-
   # handle event - card_token.updated <-
@@ -132,23 +169,19 @@ RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
       expect(moneyhash_customer.payment_method_id).to eq(event_json.dig("data", "card_token", "id"))
     end
 
-    context "when multiple_payment_methods feature flag is enabled" do
-      before { organization.update!(feature_flags: ["multiple_payment_methods"]) }
+    it "extracts and stores card details in PaymentMethod.details" do
+      result = event_service.call
 
-      it "extracts and stores card details in PaymentMethod.details" do
-        result = event_service.call
-
-        expect(result).to be_success
-        payment_method = PaymentMethod.last
-        expect(payment_method.details).to include(
-          "brand" => "Visa",
-          "last4" => "0000",
-          "expiration_month" => "02",
-          "expiration_year" => "26",
-          "card_holder_name" => "Kevin Smith",
-          "issuer" => "test"
-        )
-      end
+      expect(result).to be_success
+      payment_method = PaymentMethod.last
+      expect(payment_method.details).to include(
+        "brand" => "Visa",
+        "last4" => "0000",
+        "expiration_month" => "02",
+        "expiration_year" => "26",
+        "card_holder_name" => "Kevin Smith",
+        "issuer" => "test"
+      )
     end
 
     context "when event is card_token.updated" do
@@ -162,16 +195,12 @@ RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
         expect(moneyhash_customer.payment_method_id).to eq(event_json.dig("data", "card_token", "id"))
       end
 
-      context "when multiple_payment_methods feature flag is enabled" do
-        before { organization.update!(feature_flags: ["multiple_payment_methods"]) }
+      it "updates card details in existing PaymentMethod.details" do
+        result = event_service.call
 
-        it "updates card details in existing PaymentMethod.details" do
-          result = event_service.call
-
-          expect(result).to be_success
-          payment_method = PaymentMethod.last
-          expect(payment_method.details).to include("brand", "last4")
-        end
+        expect(result).to be_success
+        payment_method = PaymentMethod.last
+        expect(payment_method.details).to include("brand", "last4")
       end
     end
 
@@ -201,7 +230,7 @@ RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
         end
       end
 
-      context "when multiple_payment_methods feature flag is enabled" do
+      context "when a PaymentMethod record exists" do
         let!(:payment_method) do
           create(
             :payment_method,
@@ -209,10 +238,6 @@ RSpec.describe PaymentProviders::Moneyhash::HandleEventService do
             payment_provider_customer: moneyhash_customer,
             provider_method_id: payment_method_id
           )
-        end
-
-        before do
-          organization.update!(feature_flags: ["multiple_payment_methods"])
         end
 
         it "soft-deletes the PaymentMethod record" do

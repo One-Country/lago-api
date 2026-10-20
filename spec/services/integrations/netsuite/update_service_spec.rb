@@ -6,8 +6,9 @@ RSpec.describe Integrations::Netsuite::UpdateService do
   include_context "with mocked security logger"
 
   let(:integration) { create(:netsuite_integration, organization:) }
-  let(:organization) { membership.organization }
-  let(:membership) { create(:membership) }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:membership, refind: true) { create(:membership) }
 
   describe "#call" do
     subject(:service_call) { described_class.call(integration:, params: update_args) }
@@ -47,8 +48,6 @@ RSpec.describe Integrations::Netsuite::UpdateService do
       context "with netsuite premium integration present" do
         before do
           organization.update!(premium_integrations: ["netsuite"])
-          allow(Integrations::Aggregator::SendRestletEndpointJob).to receive(:perform_later)
-          allow(Integrations::Aggregator::PerformSyncJob).to receive(:perform_later)
         end
 
         context "without validation errors" do
@@ -73,7 +72,7 @@ RSpec.describe Integrations::Netsuite::UpdateService do
           it "calls Integrations::Aggregator::SendRestletEndpointJob" do
             service_call
 
-            expect(Integrations::Aggregator::SendRestletEndpointJob).to have_received(:perform_later).with(integration:)
+            expect(Integrations::Aggregator::SendRestletEndpointJob).to have_been_enqueued.with(integration:)
           end
 
           it "calls Integrations::Aggregator::PerformSyncJob" do

@@ -2,6 +2,8 @@
 
 module Invoices
   class UpdateService < BaseService
+    Result = BaseResult[:invoice]
+
     def initialize(invoice:, params:, webhook_notification: false)
       @invoice = invoice
       @params = params
@@ -74,12 +76,36 @@ module Invoices
         handle_prepaid_credits(params[:payment_status])
         handle_payment_gated_activation(params[:payment_status])
         update_fees_payment_status
+        expire_open_checkout_urls(old_payment_status)
+        cancel_open_provider_payment(old_payment_status)
         if old_payment_status != params[:payment_status] && invoice.visible?
           deliver_webhook
           log_activity
         end
       end
       update_hubspot_invoice if invoice.should_update_hubspot_invoice?
+    end
+
+    # when the invoice is settled, cancel any still-open hosted checkout session
+    def expire_open_checkout_urls(old_payment_status)
+      return unless invoice.payment_succeeded?
+      return if old_payment_status.to_s == "succeeded"
+      return unless PaymentIntent.active.exists?(invoice:)
+
+      PaymentIntents::ExpireJob.perform_after_commit(invoice)
+    end
+
+    # when the invoice is settled outside the provider (manual payment, credit note, payment request),
+    # cancel the provider payment still waiting for funds so it cannot collect a second time
+    def cancel_open_provider_payment(old_payment_status)
+      return unless invoice.payment_succeeded?
+      return if old_payment_status.to_s == "succeeded"
+
+      payment = invoice.payments.where(payable_payment_status: %w[pending processing]).first
+
+      if payment
+        PaymentProviders::CancelPaymentJob.perform_after_commit(payment)
+      end
     end
 
     def update_fees_payment_status

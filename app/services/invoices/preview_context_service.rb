@@ -18,7 +18,8 @@ module Invoices
       subscriptions_service = ::Invoices::Preview::SubscriptionsService.call(
         organization: organization,
         customer: result.customer,
-        params: subscription_params
+        params: subscription_params,
+        billing_entity: billing_entity
       )
 
       if subscriptions_service.success?
@@ -41,13 +42,21 @@ module Invoices
       params.slice(:billing_time, :plan_code, :subscription_at, :subscriptions)
     end
 
+    def new_customer_billing_entity
+      organization.default_billing_entity
+    end
+
     def find_or_build_customer
       customer_params = params[:customer] || {}
 
       customer = if customer_params.key?(:external_id)
         organization.customers.find_by!(external_id: customer_params[:external_id])
       else
-        organization.customers.new(created_at: Time.current, updated_at: Time.current, billing_entity:)
+        organization.customers.new(
+          created_at: Time.current,
+          updated_at: Time.current,
+          billing_entity: new_customer_billing_entity
+        )
       end
 
       customer.assign_attributes(

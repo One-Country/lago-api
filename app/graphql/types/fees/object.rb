@@ -6,10 +6,14 @@ module Types
       graphql_name "Fee"
       implements Types::Invoices::InvoiceItem
 
+      dataload_association :contract, :contract_rate_card
+
       field :id, ID, null: false
 
       field :add_on, Types::AddOns::Object, null: true
       field :charge, Types::Charges::Object, null: true
+      field :contract, Types::Contracts::Object, null: true
+      field :contract_rate_card, Types::ContractAppliedRateCards::Object, null: true
       field :currency, Types::CurrencyEnum, null: false
       field :description, String, null: true
       field :fixed_charge, Types::FixedCharges::Object, null: true
@@ -26,10 +30,18 @@ module Types
       field :events_count, GraphQL::Types::BigInt, null: true
       field :fee_type, Types::Fees::TypesEnum, null: false
       field :offsettable_amount_cents, GraphQL::Types::BigInt, null: false
+      field :pay_in_advance, Boolean, null: false
+      field :precise_amount_cents, GraphQL::Types::Float, null: false
+      field :precise_coupons_amount_cents, GraphQL::Types::Float, null: false
+      field :precise_total_amount_cents, GraphQL::Types::Float, null: false
       field :precise_unit_amount, GraphQL::Types::Float, null: false
+      field :sub_total_excluding_taxes_amount_cents, GraphQL::Types::BigInt, null: false
+      field :sub_total_excluding_taxes_precise_amount_cents, GraphQL::Types::Float, null: false
       field :succeeded_at, GraphQL::Types::ISO8601DateTime, null: true
       field :taxes_amount_cents, GraphQL::Types::BigInt, null: false
+      field :taxes_precise_amount_cents, GraphQL::Types::Float, null: false
       field :taxes_rate, GraphQL::Types::Float, null: true
+      field :total_amount_cents, GraphQL::Types::BigInt, null: false
       field :units, GraphQL::Types::Float, null: false
 
       field :applied_taxes, [Types::Fees::AppliedTaxes::Object]
@@ -72,7 +84,11 @@ module Types
       end
 
       def presentation_breakdowns
-        Types::Fees::PresentationBreakdownBuilder.call([object], filter: Types::Fees::PresentationBreakdownBuilder::ALL)
+        Types::Fees::PresentationBreakdownBuilder.call(
+          [object],
+          filter: Types::Fees::PresentationBreakdownBuilder::ALL,
+          filter_breakdown: Types::Fees::PresentationBreakdownBuilder::DISPLAY_IN_INVOICE
+        )
       end
     end
   end

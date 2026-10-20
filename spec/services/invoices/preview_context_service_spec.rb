@@ -175,6 +175,27 @@ RSpec.describe Invoices::PreviewContextService do
           expect(subject).to be_nil
         end
       end
+
+      context "when an explicit billing_entity is passed for a brand-new customer" do
+        let(:billing_entity) { create(:billing_entity, organization:) }
+        let(:params) do
+          {
+            customer: {
+              name: "Mislav M",
+              currency: "EUR"
+            }
+          }
+        end
+
+        context "with a brand-new customer" do
+          it "builds the customer with the organization's default billing entity" do
+            expect(subject)
+              .to be_present
+              .and be_new_record
+              .and have_attributes(billing_entity_id: organization.default_billing_entity.id)
+          end
+        end
+      end
     end
   end
 

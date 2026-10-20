@@ -3,7 +3,9 @@
 require "rails_helper"
 
 RSpec.describe BillableMetric do
-  subject(:billable_metric) { create(:billable_metric) }
+  subject(:billable_metric) { create_default(:billable_metric) }
+
+  let_it_be(:organization) { create_default(:organization) }
 
   it_behaves_like "paper_trail traceable"
 
@@ -18,6 +20,7 @@ RSpec.describe BillableMetric do
       expect(subject).to have_many(:subscriptions).through(:plans)
       expect(subject).to have_many(:invoices).through(:fees)
       expect(subject).to have_many(:filters).dependent(:delete_all)
+      expect(subject).to have_many(:product_filter_values).through(:filters)
       expect(subject).to have_many(:netsuite_mappings).dependent(:destroy)
     end
   end
@@ -48,6 +51,30 @@ RSpec.describe BillableMetric do
         expect(billable_metric.aggregation_type).to be_nil
         expect(billable_metric.errors[:aggregation_type]).to include("value_is_invalid")
       end
+    end
+  end
+
+  describe "#reset_field_name_for_count_agg" do
+    it "clears the field_name when the aggregation type is count_agg" do
+      billable_metric = build(:billable_metric, aggregation_type: :count_agg, field_name: "custom_field")
+
+      expect(billable_metric).to be_valid
+      expect(billable_metric.field_name).to be_nil
+    end
+
+    it "drops a stale field_name when switching an existing metric to count_agg" do
+      billable_metric = create(:sum_billable_metric, field_name: "custom_field")
+
+      billable_metric.update!(aggregation_type: :count_agg)
+
+      expect(billable_metric.reload.field_name).to be_nil
+    end
+
+    it "keeps the field_name for aggregation types that use it" do
+      billable_metric = build(:sum_billable_metric, field_name: "custom_field")
+
+      expect(billable_metric).to be_valid
+      expect(billable_metric.field_name).to eq("custom_field")
     end
   end
 
@@ -120,8 +147,8 @@ RSpec.describe BillableMetric do
   describe "#attached_subscriptions" do
     subject(:billable_metric) { create(:billable_metric, organization:) }
 
-    let(:organization) { create(:organization) }
-    let(:plan) { create(:plan, organization:) }
+    let_it_be(:organization) { create_default(:organization) }
+    let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
     let(:other_plan) { create(:plan, organization:) }
 
     it "returns subscriptions of plans that have a charge for this billable metric" do

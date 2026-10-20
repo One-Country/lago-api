@@ -3,6 +3,7 @@
 require "rails_helper"
 
 RSpec.describe Mutations::BillingEntities::Create, :premium do
+  let_it_be(:user) { create_default(:user) }
   include_context "with mocked security logger"
 
   let(:required_permission) { "billing_entities:create" }
@@ -23,6 +24,7 @@ RSpec.describe Mutations::BillingEntities::Create, :premium do
           taxIdentificationNumber,
           addressLine1,
           addressLine2,
+          phone,
           city,
           country,
           netPaymentTerm,
@@ -56,6 +58,7 @@ RSpec.describe Mutations::BillingEntities::Create, :premium do
       taxIdentificationNumber: "Tax-1234",
       addressLine1: "Calle de la Princesa 1",
       addressLine2: "Apt 1",
+      phone: "+49 30 1234567",
       city: "Barcelona",
       state: "Barcelona",
       zipcode: "08001",
@@ -106,7 +109,7 @@ RSpec.describe Mutations::BillingEntities::Create, :premium do
   end
 
   context "when the organization can create billing entities" do
-    let(:organization) { create(:organization, premium_integrations: %w[multi_entities_enterprise]) }
+    let_it_be(:organization) { create_default(:organization, premium_integrations: %w[multi_entities_enterprise]) }
 
     let!(:result) do
       execute_graphql(
@@ -129,6 +132,7 @@ RSpec.describe Mutations::BillingEntities::Create, :premium do
       expect(result_data["taxIdentificationNumber"]).to eq("Tax-1234")
       expect(result_data["addressLine1"]).to eq("Calle de la Princesa 1")
       expect(result_data["addressLine2"]).to eq("Apt 1")
+      expect(result_data["phone"]).to eq("+49 30 1234567")
       expect(result_data["state"]).to eq("Barcelona")
       expect(result_data["city"]).to eq("Barcelona")
       expect(result_data["zipcode"]).to eq("08001")

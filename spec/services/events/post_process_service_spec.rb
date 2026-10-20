@@ -5,11 +5,11 @@ require "rails_helper"
 RSpec.describe Events::PostProcessService do
   subject(:process_service) { described_class.new(event:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let(:billable_metric) { create(:billable_metric, organization:) }
   let(:customer) { create(:customer, organization:) }
   let(:plan) { create(:plan, organization:) }
   let(:subscription) { create(:subscription, organization:, customer:, plan:, started_at:) }
-  let(:billable_metric) { create(:billable_metric, organization:) }
   let(:charge) { create(:standard_charge, :pay_in_advance, plan:, billable_metric:) }
 
   let(:started_at) { Time.current - 3.days }
@@ -63,6 +63,40 @@ RSpec.describe Events::PostProcessService do
       end
     end
 
+    context "when the event is backdated before the subscription started" do
+      let(:timestamp) { started_at - 7.days }
+
+      context "with a recurring billable metric" do
+        let(:billable_metric) do
+          create(:billable_metric, organization:, recurring: true, aggregation_type: "sum_agg", field_name: "item_id")
+        end
+        let(:event_properties) { {"item_id" => "12"} }
+
+        it "tracks subscription activity on the fallback subscription" do
+          allow(UsageMonitoring::TrackSubscriptionActivityService).to receive(:call)
+
+          process_service.call
+
+          expect(UsageMonitoring::TrackSubscriptionActivityService).to have_received(:call)
+            .with(subscription:, organization:, date: kind_of(Date))
+        end
+
+        it "enqueues a pay in advance job" do
+          expect { process_service.call }.to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "with a non-recurring billable metric" do
+        it "does not fall back on the currently active subscription" do
+          allow(UsageMonitoring::TrackSubscriptionActivityService).to receive(:call)
+
+          process_service.call
+
+          expect(UsageMonitoring::TrackSubscriptionActivityService).not_to have_received(:call)
+        end
+      end
+    end
+
     context "when subscription is incomplete" do
       let(:subscription) do
         create(:subscription, :incomplete, organization:, customer:, plan:, started_at:)
@@ -90,6 +124,107 @@ RSpec.describe Events::PostProcessService do
 
       it "enqueues a job to perform the pay_in_advance aggregation" do
         expect { process_service.call }.to have_enqueued_job(Events::PayInAdvanceJob)
+      end
+    end
+
+    context "when the product catalog is enabled" do
+      let(:organization) { create(:organization, feature_flags: [:product_catalog]) }
+      let(:customer) { create(:customer, organization:) }
+      let(:external_subscription_id) { contract.external_id }
+      let(:charge) { nil }
+      let(:contract) { create(:contract, organization:, customer:, ended_at:, status: contract_status) }
+      let(:contract_status) { :active }
+      let(:effective_date) { timestamp.to_date }
+      let(:ended_at) { nil }
+      let(:product) { create(:product, :metered, organization:, billable_metric:) }
+      let(:rate_card) { create(:rate_card, organization:, product:, billing_timing:) }
+      let(:billing_timing) { :advance }
+      let(:rate) { create(:rate_card_rate, organization:, rate_card:, effective_from: effective_date.beginning_of_day) }
+
+      before do
+        contract_rate_card = create(:contract_rate_card, organization:, contract:, rate_card:, effective_date:)
+        create(:billing_segment, organization:, customer:, contract:, contract_rate_card:,
+          rate_card_rate: rate,
+          started_at: effective_date.beginning_of_day,
+          ended_at: effective_date.end_of_day + 1.month,
+          status: :processing)
+      end
+
+      context "when the rate card is effective at the event timestamp" do
+        let(:effective_date) { timestamp.to_date }
+
+        it "enqueues a pay in advance job" do
+          expect { process_service.call }.to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the rate card is scheduled after the event" do
+        let(:effective_date) { timestamp.to_date + 1.day }
+
+        it "does not enqueue a pay in advance job" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract has ended" do
+        let(:effective_date) { timestamp.to_date }
+        let(:ended_at) { timestamp - 1.second }
+
+        it "does not enqueue a job beyond the schedule's service period" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract ends after the event" do
+        let(:effective_date) { timestamp.to_date }
+        let(:ended_at) { timestamp + 1.second }
+
+        it "enqueues a pay in advance job" do
+          expect { process_service.call }.to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract ends at the event timestamp" do
+        let(:timestamp) { (Time.current - 1.second).change(usec: 0) }
+        let(:effective_date) { timestamp.to_date }
+        let(:ended_at) { timestamp }
+
+        it "does not enqueue a job at the exclusive contract end" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract is terminated" do
+        let(:contract_status) { :terminated }
+
+        it "does not enqueue a pay in advance job" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract is canceled" do
+        let(:contract_status) { :canceled }
+
+        it "does not enqueue a pay in advance job" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the contract is pending" do
+        let(:contract_status) { :pending }
+
+        it "does not enqueue a pay in advance job" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
+      end
+
+      context "when the rate card bills in arrears" do
+        let(:effective_date) { timestamp.to_date }
+        let(:billing_timing) { :arrears }
+
+        it "does not enqueue a pay in advance job" do
+          expect { process_service.call }.not_to have_enqueued_job(Events::PayInAdvanceJob)
+        end
       end
     end
 
@@ -144,6 +279,7 @@ RSpec.describe Events::PostProcessService do
         end
 
         context "when active wallet with target code does not exist" do
+          let(:organization) { create(:organization) }
           let(:wallet) { create(:wallet, customer:, code: target_wallet_code, status: :terminated) }
 
           before { wallet }

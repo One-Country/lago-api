@@ -2,12 +2,14 @@
 
 module Coupons
   class TerminateService < BaseService
+    Result = BaseResult[:coupon]
+
     def self.terminate_all_expired
       Coupon
         .active
         .time_limit
         .expired
-        .find_each(&:mark_as_terminated!)
+        .find_each { |coupon| call(coupon) }
     end
 
     def initialize(coupon)
@@ -18,7 +20,10 @@ module Coupons
     def call
       return result.not_found_failure!(resource: "coupon") unless coupon
 
-      coupon.mark_as_terminated! unless coupon.terminated?
+      unless coupon.terminated?
+        coupon.mark_as_terminated!
+        SendWebhookJob.perform_after_commit("coupon.terminated", coupon)
+      end
 
       result.coupon = coupon
       result

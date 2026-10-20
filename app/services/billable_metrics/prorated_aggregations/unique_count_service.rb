@@ -6,7 +6,11 @@ module BillableMetrics
       def initialize(**args)
         super
 
-        @base_aggregator = BillableMetrics::Aggregations::UniqueCountService.new(**args)
+        # NOTE: the base aggregator gets its own store instance for the same window: both
+        #       aggregators write their own per-charge state into the store they hold.
+        @base_aggregator = BillableMetrics::Aggregations::UniqueCountService.new(
+          **args.merge(event_store: event_store.for_window(**boundaries))
+        )
         @base_aggregator.result = result
 
         event_store.aggregation_property = billable_metric.field_name
@@ -19,7 +23,7 @@ module BillableMetrics
         # For charges that are pay in advance on billing date we always bill full amount
         return aggregation_without_proration if event.nil? && options[:is_pay_in_advance] && !options[:is_current_usage]
 
-        aggregation = event_store.prorated_unique_count.ceil(5)
+        aggregation = event_store.prorated_unique_count.value.ceil(5)
         result.full_units_number = aggregation_without_proration.aggregation if event.nil?
 
         if options[:is_current_usage]
@@ -34,7 +38,8 @@ module BillableMetrics
         end
 
         if presentation_by.present?
-          result.breakdowns = event_store.grouped_unique_count(uniq_grouped_by_and_presentation_by)
+          result.breakdowns = event_store.grouped_unique_count(uniq_grouped_by_and_presentation_by).map(&:to_grouped_hash)
+          result.pay_in_advance_breakdowns = build_pay_in_advance_breakdowns(value: aggregation_without_proration.pay_in_advance_aggregation)
         end
 
         result.pay_in_advance_aggregation = compute_pay_in_advance_aggregation(aggregation_without_proration:)
@@ -61,19 +66,19 @@ module BillableMetrics
         return empty_results if aggregations.blank?
 
         result.aggregations = aggregations.map do |aggregation|
-          aggregation_value = aggregation[:value].ceil(5)
+          aggregation_value = aggregation.value.ceil(5)
 
           group_result_without_proration = aggregation_without_proration.aggregations.find do |agg|
-            agg.grouped_by == aggregation[:groups]
+            agg.grouped_by == aggregation.groups
           end
 
           unless group_result_without_proration
             group_result_without_proration = empty_results.aggregations.first
-            group_result_without_proration.grouped_by = aggregation[:groups]
+            group_result_without_proration.grouped_by = aggregation.groups
           end
 
-          group_result = BaseService::Result.new
-          group_result.grouped_by = aggregation[:groups]
+          group_result = BillableMetrics::Aggregations::BaseService::Result.new
+          group_result.grouped_by = aggregation.groups
           group_result.full_units_number = group_result_without_proration&.aggregation || 0
 
           if options[:is_current_usage]
@@ -94,13 +99,20 @@ module BillableMetrics
         end
 
         if presentation_by.present?
-          result.breakdowns = event_store.grouped_unique_count(uniq_grouped_by_and_presentation_by)
+          result.breakdowns = event_store.grouped_unique_count(uniq_grouped_by_and_presentation_by).map(&:to_grouped_hash)
         end
 
         result
       end
 
       def per_event_aggregation(grouped_by_values: nil, include_event_value: false)
+        if should_bypass_aggregation?
+          return ProratedPerEventAggregationResult.new.tap do |result|
+            result.event_aggregation = []
+            result.event_prorated_aggregation = []
+          end
+        end
+
         event_aggregation_array = []
         period_aggregation = event_store.with_grouped_by_values(grouped_by_values) do
           event_store.prorated_unique_count_breakdown(with_remove: true).map do |row|

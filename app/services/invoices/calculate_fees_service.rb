@@ -2,6 +2,8 @@
 
 module Invoices
   class CalculateFeesService < BaseService
+    Result = BaseResult[:invoice, :non_invoiceable_fees]
+
     def initialize(invoice:, recurring: false, context: nil)
       @invoice = invoice
       @timestamp = invoice.invoice_subscriptions.first&.timestamp
@@ -115,12 +117,13 @@ module Invoices
     def create_charges_fees(subscription, boundaries)
       return unless charge_boundaries_valid?(boundaries)
 
-      filters = event_filters(subscription, boundaries).charges
+      filters = event_filters(subscription, boundaries).filter_targets
+      adjusted_fee_exists = AdjustedFee.where(invoice:, subscription:).matching_charge_boundaries(boundaries).exists?
 
       subscription
         .plan
         .charges
-        .includes(:taxes, billable_metric: :organization, filters: {values: :billable_metric_filter})
+        .includes(:taxes, :applied_pricing_unit, billable_metric: :organization, filters: {values: :billable_metric_filter})
         .joins(:billable_metric)
         .where(invoiceable: true)
         .where
@@ -130,11 +133,13 @@ module Invoices
 
           Fees::ChargeService.call!(
             invoice:,
-            charge:,
-            subscription:,
-            boundaries:,
-            context:,
-            filtered_aggregations: filters[charge.id] || []
+            metered_item: Fees::ChargeService::MeteredItem.from_charge(charge:, boundaries:),
+            billing_context: Billing::Context.from(subscription:),
+            options: Fees::ChargeService::Options.new(
+              context:,
+              skip_adjusted_fees: !adjusted_fee_exists
+            ),
+            filtered_aggregations: filters[charge.target_key]&.keys || []
           )
         end
     end
@@ -223,11 +228,14 @@ module Invoices
 
           fee_result = Fees::ChargeService.call!(
             invoice: nil,
-            charge:,
-            subscription:,
-            context: :recurring,
-            boundaries:,
-            apply_taxes: invoice.customer.tax_customer.blank?
+            metered_item: Fees::ChargeService::MeteredItem.from_charge(charge:, boundaries:),
+            billing_context: Billing::Context.from(subscription:),
+            plan: subscription.plan,
+            customer: subscription.customer,
+            options: Fees::ChargeService::Options.new(
+              context: :recurring,
+              apply_taxes: invoice.customer.tax_customer.blank?
+            )
           )
 
           result.non_invoiceable_fees.concat(fee_result.fees)
@@ -412,8 +420,8 @@ module Invoices
     end
 
     def event_filters(subscription, boundaries)
-      Events::BillingPeriodFilterService.call!(
-        subscription:, boundaries:
+      Events::BillingPeriodFilterService.for_charges!(
+        subscription:, boundaries:, with_last_seen_at: false
       )
     end
   end

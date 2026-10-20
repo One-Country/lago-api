@@ -5,11 +5,11 @@ require "rails_helper"
 RSpec.describe Integrations::Aggregator::Invoices::CreateJob do
   subject(:create_job) { described_class }
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
-  let(:invoice) { create(:invoice, customer:, organization:) }
-  let(:result) { BaseService::Result.new }
-  let(:reconcile_result) { BaseService::Result.new }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
+  let_it_be(:invoice) { create(:invoice, customer:, organization:) }
+  let(:result) { Integrations::Aggregator::Invoices::CreateService::Result.new }
+  let(:reconcile_result) { Integrations::Aggregator::Invoices::ReconcileService::Result.new }
 
   before do
     allow(Integrations::Aggregator::Invoices::CreateService).to receive(:call).and_return(result)

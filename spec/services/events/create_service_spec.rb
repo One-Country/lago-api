@@ -46,7 +46,7 @@ RSpec.describe Events::CreateService do
         external_subscription_id:,
         transaction_id:,
         code:,
-        timestamp: Time.zone.at(timestamp),
+        timestamp: Time.zone.at(BigDecimal(timestamp.to_s)),
         properties: {"foo" => "bar"},
         precise_total_amount_cents: nil
       )
@@ -54,6 +54,47 @@ RSpec.describe Events::CreateService do
 
     it "enqueues a post processing job" do
       expect { create_service.call }.to have_enqueued_job(Events::PostProcessJob)
+    end
+
+    context "when the post processing job cannot be enqueued" do
+      before do
+        allow(ActiveJob::Base.queue_adapter).to receive(:enqueue)
+          .and_raise(Redis::CannotConnectError.new("no connection"))
+      end
+
+      # `index_unique_transaction_id` has no `deleted_at` predicate, so keeping the event would
+      # answer the caller's retry with `value_already_exist` forever.
+      it "does not keep the event" do
+        expect { create_service.call }.to raise_error(Redis::CannotConnectError)
+          .and(not_change(Event, :count))
+      end
+
+      context "when kafka is configured", :capture_kafka_messages do
+        before do
+          ENV["LAGO_KAFKA_BOOTSTRAP_SERVERS"] = "kafka"
+          ENV["LAGO_KAFKA_RAW_EVENTS_TOPIC"] = "raw_events"
+        end
+
+        it "does not produce the event on kafka" do
+          expect { create_service.call }.to raise_error(Redis::CannotConnectError)
+
+          expect(karafka_producer).not_to have_received(:produce_many_async)
+        end
+      end
+    end
+
+    # `ActiveJob::SerializationError` is an `ArgumentError`, which must not be reported to the
+    # caller as an invalid timestamp.
+    context "when the job cannot be serialized" do
+      before do
+        allow(ActiveJob::Base.queue_adapter).to receive(:enqueue)
+          .and_raise(ActiveJob::SerializationError.new("unserializable"))
+      end
+
+      it "surfaces the failure instead of blaming the payload" do
+        expect { create_service.call }.to raise_error(ActiveJob::SerializationError)
+          .and(not_change(Event, :count))
+      end
     end
 
     context "when event already exists" do
@@ -80,6 +121,45 @@ RSpec.describe Events::CreateService do
       end
     end
 
+    context "when timestamp is outside what the event stores can hold" do
+      [-1, 99_999_999_999].each do |value|
+        context "with #{value}" do
+          let(:timestamp) { value }
+
+          it "returns an error and does not create the event" do
+            result = nil
+
+            expect { result = create_service.call }.not_to change(Event, :count)
+            expect(result).not_to be_success
+            expect(result.error.messages).to eq({timestamp: ["value_is_out_of_range"]})
+          end
+        end
+      end
+    end
+
+    context "when a maximum future window is configured" do
+      before { stub_const("Events::TimestampWindow::MAX_FUTURE_HOURS", 24) }
+
+      context "with a timestamp beyond it" do
+        let(:timestamp) { 2.days.from_now.to_f }
+
+        it "returns an error" do
+          result = create_service.call
+
+          expect(result).not_to be_success
+          expect(result.error.messages).to eq({timestamp: ["value_is_out_of_range"]})
+        end
+      end
+
+      context "with a timestamp within it" do
+        let(:timestamp) { 1.hour.from_now.to_f }
+
+        it "creates the event" do
+          expect(create_service.call).to be_success
+        end
+      end
+    end
+
     context "when timestamp is not present in the payload" do
       let(:timestamp) { nil }
 
@@ -98,7 +178,7 @@ RSpec.describe Events::CreateService do
         result = create_service.call
 
         expect(result).to be_success
-        expect(result.event.timestamp).to eq(Time.zone.at(timestamp.to_f))
+        expect(result.event.timestamp).to eq(Time.zone.at(BigDecimal(timestamp)))
       end
     end
 
@@ -113,6 +193,28 @@ RSpec.describe Events::CreateService do
       end
     end
 
+    context "when timestamp is sent with decimal fractions represented by repeating floats" do
+      let(:timestamps) { %w[1780586634.1 1780586634.2 1780586634.3] }
+
+      it "creates events with the received timestamp precision" do
+        results = timestamps.map do |received_timestamp|
+          described_class.call(
+            organization:,
+            params: create_args.merge(timestamp: received_timestamp, transaction_id: SecureRandom.uuid),
+            timestamp: creation_timestamp,
+            metadata:
+          )
+        end
+
+        expect(results).to all(be_success)
+        expect(results.map { |result| result.event.timestamp.iso8601(9) }).to eq([
+          "2026-06-04T15:23:54.100000000Z",
+          "2026-06-04T15:23:54.200000000Z",
+          "2026-06-04T15:23:54.300000000Z"
+        ])
+      end
+    end
+
     context "when timestamp is given in a wrong format" do
       let(:timestamp) { Time.current.to_s }
 
@@ -121,6 +223,19 @@ RSpec.describe Events::CreateService do
 
         expect(result).not_to be_success
         expect(result.error.messages).to include({timestamp: ["invalid_format"]})
+      end
+    end
+
+    %w[Infinity -Infinity NaN].each do |value|
+      context "when timestamp is #{value}" do
+        let(:timestamp) { value }
+
+        it "returns an error instead of raising" do
+          result = create_service.call
+
+          expect(result).not_to be_success
+          expect(result.error.messages).to include({timestamp: ["invalid_format"]})
+        end
       end
     end
 
@@ -140,7 +255,7 @@ RSpec.describe Events::CreateService do
     end
 
     context "with an expression configured on the billable metric" do
-      let(:billable_metric) { create(:billable_metric, code:, organization:, field_name: "result", expression: "event.properties.left + event.properties.right") }
+      let(:billable_metric) { create(:sum_billable_metric, code:, organization:, field_name: "result", expression: "event.properties.left + event.properties.right") }
 
       let(:create_args) do
         {

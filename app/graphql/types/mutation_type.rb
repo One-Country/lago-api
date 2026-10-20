@@ -22,13 +22,33 @@ module Types
     field :destroy_adjusted_fee, mutation: Mutations::AdjustedFees::Destroy
     field :preview_adjusted_fee, mutation: Mutations::AdjustedFees::Preview
 
+    field :create_catalog_plan, mutation: Mutations::CatalogPlans::Create
+    field :destroy_catalog_plan, mutation: Mutations::CatalogPlans::Destroy
+    field :update_catalog_plan, mutation: Mutations::CatalogPlans::Update
+
     field :create_plan, mutation: Mutations::Plans::Create
     field :destroy_plan, mutation: Mutations::Plans::Destroy
     field :update_plan, mutation: Mutations::Plans::Update
 
+    field :create_plan_applied_rate_card, mutation: Mutations::PlanAppliedRateCards::Create
+    field :create_rate_phase, mutation: Mutations::RatePhases::Create
+    field :destroy_plan_applied_rate_card, mutation: Mutations::PlanAppliedRateCards::Destroy
+    field :destroy_rate_phase, mutation: Mutations::RatePhases::Destroy
+    field :update_plan_applied_rate_card, mutation: Mutations::PlanAppliedRateCards::Update
+    field :update_rate_phase, mutation: Mutations::RatePhases::Update
+
     field :create_charge, mutation: Mutations::Charges::Create
+    field :create_contract, mutation: Mutations::Contracts::Create
+    field :create_contract_applied_rate_card, mutation: Mutations::ContractAppliedRateCards::Create
+    field :create_contract_rate_phase, mutation: Mutations::ContractRatePhases::Create
     field :destroy_charge, mutation: Mutations::Charges::Destroy
+    field :destroy_contract_applied_rate_card, mutation: Mutations::ContractAppliedRateCards::Destroy
+    field :destroy_contract_rate_phase, mutation: Mutations::ContractRatePhases::Destroy
+    field :terminate_contract, mutation: Mutations::Contracts::Terminate
     field :update_charge, mutation: Mutations::Charges::Update
+    field :update_contract, mutation: Mutations::Contracts::Update
+    field :update_contract_applied_rate_card, mutation: Mutations::ContractAppliedRateCards::Update
+    field :update_contract_rate_phase, mutation: Mutations::ContractRatePhases::Update
 
     field :create_charge_filter, mutation: Mutations::ChargeFilters::Create
     field :destroy_charge_filter, mutation: Mutations::ChargeFilters::Destroy
@@ -66,6 +86,8 @@ module Types
     field :terminate_coupon, mutation: Mutations::Coupons::Terminate
     field :update_coupon, mutation: Mutations::Coupons::Update
 
+    field :mark_order_form_as_signed, mutation: Mutations::OrderForms::MarkAsSigned
+
     field :create_add_on, mutation: Mutations::AddOns::Create
     field :create_applied_coupon, mutation: Mutations::AppliedCoupons::Create
     field :destroy_add_on, mutation: Mutations::AddOns::Destroy
@@ -92,6 +114,15 @@ module Types
     field :generate_checkout_url, mutation: Mutations::PaymentMethods::GenerateCheckoutUrl
     field :set_payment_method_as_default, mutation: Mutations::PaymentMethods::SetAsDefault
 
+    field :create_integration_customer, mutation: Mutations::IntegrationCustomers::Create
+    field :create_payment_provider_customer, mutation: Mutations::PaymentProviderCustomers::Create
+    field :destroy_payment_provider_customer, mutation: Mutations::PaymentProviderCustomers::Destroy
+
+    field :set_integration_customer_as_default, mutation: Mutations::IntegrationCustomers::SetAsDefault
+    field :set_payment_provider_customer_as_default, mutation: Mutations::PaymentProviderCustomers::SetAsDefault
+    field :update_integration_customer, mutation: Mutations::IntegrationCustomers::Update
+    field :update_payment_provider_customer, mutation: Mutations::PaymentProviderCustomers::Update
+
     field :create_netsuite_integration, mutation: Mutations::Integrations::Netsuite::Create
     field :destroy_integration, mutation: Mutations::Integrations::Destroy
     field :update_netsuite_integration, mutation: Mutations::Integrations::Netsuite::Update
@@ -103,6 +134,7 @@ module Types
     field :update_integration_collection_mapping, mutation: Mutations::IntegrationCollectionMappings::Update
 
     field :destroy_integration_collection_mapping, mutation: Mutations::IntegrationCollectionMappings::Destroy
+    field :destroy_integration_customer, mutation: Mutations::IntegrationCustomers::Destroy
     field :destroy_integration_mapping, mutation: Mutations::IntegrationMappings::Destroy
 
     field :fetch_integration_accounts, mutation: Mutations::IntegrationItems::FetchAccounts
@@ -122,6 +154,7 @@ module Types
     field :void_credit_note, mutation: Mutations::CreditNotes::Void
 
     field :create_invoice, mutation: Mutations::Invoices::Create
+    field :delete_invoice, mutation: Mutations::Invoices::Delete
     field :download_invoice, mutation: Mutations::Invoices::Download
     field :download_invoice_xml, mutation: Mutations::Invoices::DownloadXml
     field :finalize_all_invoices, mutation: Mutations::Invoices::FinalizeAll
@@ -139,6 +172,7 @@ module Types
     field :update_invoice, mutation: Mutations::Invoices::Update
     field :void_invoice, mutation: Mutations::Invoices::Void
 
+    field :add_quote_image, mutation: Mutations::Quotes::AddImage
     field :create_quote, mutation: Mutations::Quotes::Create
     field :update_quote, mutation: Mutations::Quotes::Update
 
@@ -146,6 +180,11 @@ module Types
     field :clone_quote_version, mutation: Mutations::QuoteVersions::Clone
     field :update_quote_version, mutation: Mutations::QuoteVersions::Update
     field :void_quote_version, mutation: Mutations::QuoteVersions::Void
+
+    field :void_order_form, mutation: Mutations::OrderForms::Void
+
+    field :execute_order, mutation: Mutations::Orders::Execute
+    field :update_order, mutation: Mutations::Orders::Update
 
     field :download_payment_receipt, mutation: Mutations::PaymentReceipts::Download
     field :download_xml_payment_receipt, mutation: Mutations::PaymentReceipts::DownloadXml
@@ -163,6 +202,7 @@ module Types
 
     field :accept_invite, mutation: Mutations::Invites::Accept
     field :create_invite, mutation: Mutations::Invites::Create
+    field :join_organization, mutation: Mutations::Invites::JoinOrganization
     field :revoke_invite, mutation: Mutations::Invites::Revoke
     field :update_invite, mutation: Mutations::Invites::Update
 
@@ -193,6 +233,9 @@ module Types
     field :create_okta_integration, mutation: Mutations::Integrations::Okta::Create
     field :update_okta_integration, mutation: Mutations::Integrations::Okta::Update
 
+    field :create_entra_id_integration, mutation: Mutations::Integrations::EntraId::Create
+    field :update_entra_id_integration, mutation: Mutations::Integrations::EntraId::Update
+
     field :create_anrok_integration, mutation: Mutations::Integrations::Anrok::Create
     field :update_anrok_integration, mutation: Mutations::Integrations::Anrok::Update
 
@@ -214,6 +257,10 @@ module Types
     field :okta_authorize, mutation: Mutations::Auth::Okta::Authorize
     field :okta_login, mutation: Mutations::Auth::Okta::Login
 
+    field :entra_id_accept_invite, mutation: Mutations::Auth::EntraId::AcceptInvite
+    field :entra_id_authorize, mutation: Mutations::Auth::EntraId::Authorize
+    field :entra_id_login, mutation: Mutations::Auth::EntraId::Login
+
     field :create_dunning_campaign, mutation: Mutations::DunningCampaigns::Create
     field :destroy_dunning_campaign, mutation: Mutations::DunningCampaigns::Destroy
     field :update_dunning_campaign, mutation: Mutations::DunningCampaigns::Update
@@ -225,6 +272,26 @@ module Types
 
     field :create_pricing_unit, mutation: Mutations::PricingUnits::Create
     field :update_pricing_unit, mutation: Mutations::PricingUnits::Update
+
+    field :create_product_category, mutation: Mutations::ProductCategories::Create
+    field :destroy_product_category, mutation: Mutations::ProductCategories::Destroy
+    field :update_product_category, mutation: Mutations::ProductCategories::Update
+
+    field :create_product, mutation: Mutations::Products::Create
+    field :destroy_product, mutation: Mutations::Products::Destroy
+    field :update_product, mutation: Mutations::Products::Update
+
+    field :create_product_filter, mutation: Mutations::ProductFilters::Create
+    field :destroy_product_filter, mutation: Mutations::ProductFilters::Destroy
+    field :update_product_filter, mutation: Mutations::ProductFilters::Update
+
+    field :create_rate_card, mutation: Mutations::RateCards::Create
+    field :destroy_rate_card, mutation: Mutations::RateCards::Destroy
+    field :update_rate_card, mutation: Mutations::RateCards::Update
+
+    field :create_rate_card_rate, mutation: Mutations::RateCardRates::Create
+    field :destroy_rate_card_rate, mutation: Mutations::RateCardRates::Destroy
+    field :update_rate_card_rate, mutation: Mutations::RateCardRates::Update
 
     field :create_role, mutation: Mutations::Roles::Create
     field :destroy_role, mutation: Mutations::Roles::Destroy
@@ -245,6 +312,19 @@ module Types
     field :create_or_update_subscription_entitlement, mutation: Mutations::Entitlement::CreateOrUpdateSubscriptionEntitlement
     field :remove_subscription_entitlement, mutation: Mutations::Entitlement::RemoveSubscriptionEntitlement
 
+    field :ask_finance_assistant, mutation: Mutations::FinanceAssistant::Ask
     field :create_ai_conversation, mutation: Mutations::AiConversations::Create
+
+    field :create_superset_guest_token, mutation: Mutations::Superset::CreateGuestToken
+
+    field :export_finance_assistant_result, mutation: Mutations::FinanceAssistant::Export
+
+    field :create_usage_attribution_type, mutation: Mutations::UsageAttributionTypes::Create
+    field :destroy_usage_attribution_type, mutation: Mutations::UsageAttributionTypes::Destroy
+    field :update_usage_attribution_type, mutation: Mutations::UsageAttributionTypes::Update
+
+    field :admin_create_organization, mutation: Mutations::Admin::CreateOrganization
+    field :admin_rollback_change, mutation: Mutations::Admin::RollbackChange
+    field :admin_toggle_feature, mutation: Mutations::Admin::ToggleFeature
   end
 end

@@ -12,6 +12,7 @@ module Types
       argument :invoice_requires_successful_payment, Boolean, required: false
       argument :name, String, required: false
       argument :priority, Integer, required: true
+      argument :purchase_order_number, String, required: false
 
       argument :paid_top_up_max_amount_cents, GraphQL::Types::BigInt, required: false
       argument :paid_top_up_min_amount_cents, GraphQL::Types::BigInt, required: false
@@ -24,6 +25,8 @@ module Types
       argument :metadata, [Types::Metadata::Input], required: false, **Types::Metadata::Input::ARGUMENT_OPTIONS
 
       argument :payment_method, Types::PaymentMethods::ReferenceInput, required: false
+
+      argument :connections, Types::Connections::Input, required: false
     end
   end
 end

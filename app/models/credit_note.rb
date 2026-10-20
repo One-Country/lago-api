@@ -14,6 +14,9 @@ class CreditNote < ApplicationRecord
   belongs_to :organization
 
   has_one :billing_entity, through: :invoice
+
+  delegate :purchase_order_number, to: :invoice, allow_nil: true
+
   has_one :metadata,
     class_name: "Metadata::ItemMetadata",
     as: :owner,
@@ -61,7 +64,7 @@ class CreditNote < ApplicationRecord
   TYPES = %w[credit refund offset].freeze
 
   REASON = %i[duplicated_charge product_unsatisfactory order_change order_cancellation fraudulent_charge other].freeze
-  STATUS = %i[draft finalized].freeze
+  STATUS = %i[draft finalized deleted].freeze
 
   enum :credit_status, CREDIT_STATUS
   enum :refund_status, REFUND_STATUS, validate: {allow_nil: true}
@@ -111,36 +114,6 @@ class CreditNote < ApplicationRecord
 
   def has_offset?
     offset_amount_cents.positive?
-  end
-
-  def subscription_ids
-    fees.pluck(:subscription_id).uniq
-  end
-
-  def subscription_item(subscription_id)
-    items.joins(:fee)
-      .merge(Fee.subscription)
-      .find_by(fees: {subscription_id:}) || Fee.new(amount_cents: 0, amount_currency: currency)
-  end
-
-  def subscription_charge_items(subscription_id)
-    items.joins(:fee)
-      .merge(Fee.charge)
-      .where(fees: {subscription_id:})
-      .includes(:fee)
-  end
-
-  def subscription_fixed_charge_items(subscription_id)
-    items.joins(:fee)
-      .merge(Fee.fixed_charge)
-      .where(fees: {subscription_id:})
-      .includes(:fee)
-  end
-
-  def add_on_items
-    items.joins(:fee)
-      .merge(Fee.add_on)
-      .includes(:fee)
   end
 
   def should_sync_credit_note?

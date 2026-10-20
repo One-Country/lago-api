@@ -5,6 +5,11 @@ require "rails_helper"
 RSpec.describe Wallets::RecurringTransactionRules::CreateService do
   subject(:create_service) { described_class.new(wallet:, wallet_params:) }
 
+  before_all do
+    create_default(:organization)
+    create_default(:customer)
+  end
+
   let(:wallet) { create(:wallet, paid_top_up_min_amount_cents: 15_00) }
   let(:wallet_params) do
     {
@@ -50,6 +55,32 @@ RSpec.describe Wallets::RecurringTransactionRules::CreateService do
           invoice_requires_successful_payment: false,
           ignore_paid_top_up_limits: true
         )
+      end
+
+      context "when purchase_order_number is present in rule params" do
+        let(:rule_params) do
+          super().merge(purchase_order_number: "PO-RULE-123")
+        end
+
+        it "creates rule with the purchase order number" do
+          expect { create_service.call }.to change { wallet.reload.recurring_transaction_rules.count }.by(1)
+
+          expect(wallet.recurring_transaction_rules.first.purchase_order_number).to eq("PO-RULE-123")
+        end
+      end
+
+      context "when purchase_order_number is too long" do
+        let(:rule_params) do
+          super().merge(purchase_order_number: "a" * 256)
+        end
+
+        it "returns a validation error" do
+          expect { create_service.call }.not_to change { wallet.reload.recurring_transaction_rules.count }
+
+          result = create_service.call
+          expect(result).to be_failure
+          expect(result.error.messages[:purchase_order_number]).to eq(["value_is_too_long"])
+        end
       end
 
       context "when method is fixed" do
@@ -139,17 +170,58 @@ RSpec.describe Wallets::RecurringTransactionRules::CreateService do
           }
         end
 
-        it "creates rule with expected attributes ignoring wallet limits" do
+        it "creates rule with expected attributes ignoring wallet limits and grants_target_top_up defaulting to false" do
           expect { create_service.call }.to change { wallet.reload.recurring_transaction_rules.count }.by(1)
 
           expect(wallet.recurring_transaction_rules.first).to have_attributes(
             granted_credits: 0.0,
+            grants_target_top_up: false,
             method: "target",
             paid_credits: 5.0,
             target_ongoing_balance: nil,
             threshold_credits: 1.0,
             trigger: "threshold"
           )
+        end
+
+        context "when grants_target_top_up is true" do
+          let(:rule_params) do
+            {
+              trigger: "threshold",
+              method: "target",
+              threshold_credits: "1.0",
+              grants_target_top_up: "true"
+            }
+          end
+
+          it "creates rule with grants_target_top_up true" do
+            expect { create_service.call }.to change { wallet.reload.recurring_transaction_rules.count }.by(1)
+
+            expect(wallet.recurring_transaction_rules.first).to have_attributes(
+              method: "target",
+              grants_target_top_up: true
+            )
+          end
+        end
+
+        context "when grants_target_top_up is false" do
+          let(:rule_params) do
+            {
+              trigger: "threshold",
+              method: "target",
+              threshold_credits: "1.0",
+              grants_target_top_up: "false"
+            }
+          end
+
+          it "creates rule with grants_target_top_up false" do
+            expect { create_service.call }.to change { wallet.reload.recurring_transaction_rules.count }.by(1)
+
+            expect(wallet.recurring_transaction_rules.first).to have_attributes(
+              method: "target",
+              grants_target_top_up: false
+            )
+          end
         end
       end
 
@@ -384,6 +456,40 @@ RSpec.describe Wallets::RecurringTransactionRules::CreateService do
             expect(sections.count).to eq(2)
             expect(sections.pluck(:invoice_custom_section_id)).to include(section_1.id, section_2.id)
           end
+        end
+      end
+    end
+
+    context "with connections", :premium do
+      let(:customer) { wallet.customer }
+      let(:rule_params) { super().merge(connections: {payment: {code: "stripe_us"}}) }
+
+      before { customer.organization.enable_feature_flag!(:multi_connection) }
+
+      context "when the code resolves" do
+        let!(:stripe_connection) { create(:stripe_customer, customer:, code: "stripe_us") }
+
+        it "pins the connection on the rule" do
+          rule = create_service.call.recurring_transaction_rule
+
+          expect(rule.billing_object_connections.sole).to have_attributes(
+            category: "payment",
+            behavior: "specific",
+            payment_provider_customer_id: stripe_connection.id
+          )
+        end
+      end
+
+      context "when the code does not resolve" do
+        it "surfaces connection_not_found rather than swallowing it" do
+          result = create_service.call
+
+          expect(result).not_to be_success
+          expect(result.error.messages[:connections]).to include("connection_not_found")
+        end
+
+        it "persists no connection row" do
+          expect { create_service.call }.not_to change(BillingObjectConnection, :count)
         end
       end
     end

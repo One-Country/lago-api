@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe Plans::UpdateAmountService do
   subject(:update_service) { described_class.new(plan:, amount_cents:, expected_amount_cents:) }
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:membership) { create(:membership) }
   let(:plan) { create(:plan, organization:, amount_cents: 111) }
   let(:amount_cents) { 222 }
   let(:expected_amount_cents) { 111 }
@@ -48,7 +48,7 @@ RSpec.describe Plans::UpdateAmountService do
       let(:pending_subscription) do
         create(:subscription, plan:, status: :pending, previous_subscription_id: subscription.id)
       end
-      let(:plan_upgrade_result) { BaseService::Result.new }
+      let(:plan_upgrade_result) { Subscriptions::PlanUpgradeService::Result.new }
 
       before do
         allow(Subscriptions::PlanUpgradeService)
@@ -61,7 +61,30 @@ RSpec.describe Plans::UpdateAmountService do
       it "upgrades subscription plan" do
         update_service.call
 
-        expect(Subscriptions::PlanUpgradeService).to have_received(:call)
+        expect(Subscriptions::PlanUpgradeService).to have_received(:call).with(
+          current_subscription: subscription,
+          plan: plan,
+          params: {name: pending_subscription.name}
+        )
+      end
+
+      context "when the pending subscription has activation rules" do
+        before do
+          create(:subscription_activation_rule, subscription: pending_subscription, organization:, timeout_hours: 24)
+        end
+
+        it "forwards the activation_rules to the plan upgrade" do
+          update_service.call
+
+          expect(Subscriptions::PlanUpgradeService).to have_received(:call).with(
+            current_subscription: subscription,
+            plan: plan,
+            params: {
+              name: pending_subscription.name,
+              activation_rules: [{type: "payment", timeout_hours: 24}]
+            }
+          )
+        end
       end
 
       context "when pending subscription does not have a previous one" do
@@ -78,7 +101,7 @@ RSpec.describe Plans::UpdateAmountService do
 
       context "when subscription upgrade fails" do
         let(:plan_upgrade_result) do
-          BaseService::Result.new.validation_failure!(
+          Subscriptions::PlanUpgradeService::Result.new.validation_failure!(
             errors: {billing_time: ["value_is_invalid"]}
           )
         end

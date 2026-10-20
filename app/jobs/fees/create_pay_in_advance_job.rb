@@ -4,30 +4,90 @@ module Fees
   class CreatePayInAdvanceJob < ApplicationJob
     queue_as :default
 
+    # Random jitter (in seconds) added to every retry so parallel failed jobs
+    # don't retry in lockstep and overload Clickhouse again at the same instant.
+    RETRY_JITTER = 1..15
+
     retry_on BaseService::ThrottlingError, wait: :polynomially_longer, attempts: 25
+
+    # Increasing backoff (a few seconds, then longer and longer) plus jitter, to give
+    # Clickhouse time to recover from too many high-usage parallel calls.
+    retry_on Events::Stores::Clickhouse::MemoryLimitError,
+      wait: ->(executions) { Fees::CreatePayInAdvanceJob.retry_wait(executions) },
+      attempts: 25
+
+    def self.retry_wait(executions)
+      (executions**4) + rand(RETRY_JITTER)
+    end
 
     unique :until_executed, on_conflict: :log
 
-    def perform(charge:, event:, billing_at: nil)
-      result = Fees::CreatePayInAdvanceService.call(charge:, event:, billing_at:)
+    def perform(charge: nil, metered_item: nil, event: nil, billing_at: nil)
+      resolved_metered_item = pay_in_advance_arguments.metered_item
+      billing_context = pay_in_advance_arguments.billing_context
 
-      return if !result.success? && tax_error?(result)
+      unless billing_context
+        skip_missing_billing_context(
+          metered_item: resolved_metered_item,
+          timestamp: billing_at || resolved_metered_item.event.timestamp
+        )
+        return
+      end
 
-      result.raise_if_error!
+      result = Fees::CreatePayInAdvanceService.call(
+        metered_item: resolved_metered_item,
+        billing_context:,
+        billing_at:
+      )
+
+      return if result.success?
+
+      unless tax_error?(result) || duplicate_fee?(result)
+        result.raise_if_error!
+      end
     end
 
-    def lock_key_arguments
-      args = arguments.first
-      event = Events::CommonFactory.new_instance(source: args[:event])
-      [args[:charge], event.organization_id, event.external_subscription_id, event.transaction_id]
-    end
+    delegate :lock_key_arguments, to: :pay_in_advance_arguments
 
     private
+
+    def pay_in_advance_arguments
+      @pay_in_advance_arguments ||= PayInAdvanceArguments.new(
+        metered_item: arguments.first.with_indifferent_access[:metered_item],
+        charge: arguments.first.with_indifferent_access[:charge],
+        event: arguments.first.with_indifferent_access[:event]
+      )
+    end
+
+    def duplicate_fee?(result)
+      return false unless result.error.is_a?(BaseService::ValidationFailure)
+
+      result.error.messages[:pay_in_advance_event_transaction_id]&.include?("pay_in_advance_fee_already_exists")
+    end
 
     def tax_error?(result)
       return false unless result.error.is_a?(BaseService::ValidationFailure)
 
       result.error&.messages&.dig(:tax_error).present?
+    end
+
+    def skip_missing_billing_context(metered_item:, timestamp:)
+      event = metered_item.event
+      message = "Fees::CreatePayInAdvanceJob skipped: no billing context for event"
+      context = {
+        organization_id: event.organization_id,
+        external_subscription_id: event.external_subscription_id,
+        event_transaction_id: event.transaction_id,
+        event_timestamp: timestamp.iso8601
+      }.merge(
+        if metered_item.billing_segment
+          {billing_segment_id: metered_item.billing_segment.id}
+        else
+          {charge_id: metered_item.charge.id}
+        end
+      )
+
+      Rails.logger.error("#{message} #{context.map { |key, value| "#{key}=#{value}" }.join(" ")}")
     end
   end
 end

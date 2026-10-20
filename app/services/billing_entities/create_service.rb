@@ -41,7 +41,7 @@ module BillingEntities
       end
 
       track_billing_entity_created
-      register_security_log(billing_entity)
+      after_commit { register_security_log(billing_entity) }
 
       result.billing_entity = billing_entity
       result
@@ -72,6 +72,7 @@ module BillingEntities
           legal_number
           name
           net_payment_term
+          phone
           state
           tax_identification_number
           vat_rate

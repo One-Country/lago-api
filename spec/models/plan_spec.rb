@@ -5,6 +5,8 @@ require "rails_helper"
 RSpec.describe Plan do
   subject(:plan) { build(:plan, trial_period: 3) }
 
+  let_it_be(:organization) { create_default(:organization) }
+
   it { expect(described_class).to be_soft_deletable }
 
   it do
@@ -29,7 +31,7 @@ RSpec.describe Plan do
     expect(subject).to have_many(:entitlements).class_name("Entitlement::Entitlement").dependent(:destroy)
     expect(subject).to have_many(:entitlement_values).through(:entitlements).source(:values).class_name("Entitlement::EntitlementValue").dependent(:destroy)
 
-    expect(subject).to define_enum_for(:interval).with_values(Plan::INTERVALS).validating
+    expect(subject).to define_enum_for(:interval).with_values(Plan::INTERVALS).validating(allowing_nil: true)
   end
 
   describe "Clickhouse associations", clickhouse: true do
@@ -46,6 +48,16 @@ RSpec.describe Plan do
       plan.pay_in_advance = true
       expect(plan).to be_valid
     end
+
+    context "with a legacy plan" do
+      it "requires interval and amount_cents" do
+        plan.interval = nil
+        plan.amount_cents = nil
+        expect(plan).not_to be_valid
+        expect(plan.errors.messages[:interval]).to eq(["value_is_invalid"])
+        expect(plan.errors.messages[:amount_cents]).to eq(["value_is_mandatory"])
+      end
+    end
   end
 
   describe "#is_parent? and #is_child?" do
@@ -60,7 +72,7 @@ RSpec.describe Plan do
   end
 
   describe "#applicable_usage_thresholds" do
-    let(:plan) { create(:plan) }
+    let_it_be(:plan, refind: true) { create_default(:plan) }
 
     it "returns usage thresholds plan is a parent" do
       threshold = create(:usage_threshold, plan: plan)
@@ -455,49 +467,6 @@ RSpec.describe Plan do
       it "returns invoice display name" do
         expect(plan_invoice_name).to eq(plan.invoice_display_name)
       end
-    end
-  end
-
-  describe "#active_subscriptions_count" do
-    let(:plan) { create(:plan) }
-
-    it "returns the number of active subscriptions" do
-      create(:subscription, plan:)
-      overridden_plan = create(:plan, parent_id: plan.id)
-      create(:subscription, plan: overridden_plan)
-
-      expect(plan.active_subscriptions_count).to eq(2)
-    end
-  end
-
-  describe "#customers_count" do
-    let(:customer) { create(:customer) }
-    let(:plan) { create(:plan) }
-
-    it "returns the number of impacted customers" do
-      create(:subscription, customer:, plan:)
-      overridden_plan = create(:plan, parent_id: plan.id)
-      customer2 = create(:customer, organization: plan.organization)
-      create(:subscription, customer: customer2, plan: overridden_plan)
-
-      expect(plan.customers_count).to eq(2)
-    end
-  end
-
-  describe "#draft_invoices_count" do
-    let(:plan) { create(:plan) }
-
-    it "returns the number draft invoices" do
-      subscription = create(:subscription, plan:)
-      invoice = create(:invoice, :draft)
-      create(:invoice_subscription, invoice:, subscription:)
-
-      overridden_plan = create(:plan, parent_id: plan.id)
-      subscription2 = create(:subscription, plan: overridden_plan)
-      invoice2 = create(:invoice, :draft)
-      create(:invoice_subscription, invoice: invoice2, subscription: subscription2)
-
-      expect(plan.draft_invoices_count).to eq(2)
     end
   end
 

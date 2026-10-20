@@ -70,11 +70,48 @@ RSpec.describe "templates/invoices/v4.slim" do
 
   let(:wallet_name) { "Premium Wallet" }
 
+  shared_examples "an invoice translated in every locale" do
+    I18n.available_locales.each do |locale|
+      context "with the #{locale} locale" do
+        before { I18n.locale = locale }
+        after { I18n.locale = I18n.default_locale }
+
+        it "renders no missing translation" do
+          expect(rendered_template).not_to include("Translation missing")
+        end
+      end
+    end
+  end
+
   before do
     I18n.locale = :en
   end
 
   context "when invoice_type is credit" do
+    context "with a purchase order number" do
+      let(:invoice) do
+        build_stubbed(
+          :invoice,
+          :credit,
+          :with_purchase_order_number,
+          organization: organization,
+          billing_entity: billing_entity,
+          customer: customer,
+          number: "LAGO-202509-001",
+          payment_due_date: Date.parse("2025-09-04"),
+          issuing_date: Date.parse("2025-09-04"),
+          total_amount_cents: 1050,
+          currency: "USD",
+          fees: [fee]
+        )
+      end
+
+      it "renders the purchase order number under the invoice number" do
+        expect(rendered_template).to include("Purchase Order Number")
+        expect(rendered_template).to include("PO-123")
+      end
+    end
+
     context "when wallet transaction has a name" do
       let(:wallet_transaction_name) { "Wallet Transaction Name" }
 
@@ -188,6 +225,8 @@ RSpec.describe "templates/invoices/v4.slim" do
       it "renders correctly" do
         expect(rendered_template).to match_html_snapshot
       end
+
+      it_behaves_like "an invoice translated in every locale"
     end
 
     context "without breakdown (legacy behavior)" do
@@ -611,6 +650,24 @@ RSpec.describe "templates/invoices/v4.slim" do
 
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
+    end
+
+    it_behaves_like "an invoice translated in every locale"
+
+    context "when a fixed charge fee has zero units and a positive amount" do
+      before do
+        arrears_fixed_charge_fee.update!(units: 0, unit_amount_cents: 0, precise_unit_amount: 0)
+      end
+
+      it "renders the fee line" do
+        fee_row = Nokogiri::HTML.fragment(rendered_template).css("tr.fee").find do |row|
+          row.text.include?("Standard Pay in Arrears Fixed Charge Fee")
+        end
+
+        expect(fee_row.css("td").map { |cell| cell.text.squish }).to eq(
+          ["Standard Pay in Arrears Fixed Charge Fee", "0", "$0.00", "0.0%", "$85.00"]
+        )
+      end
     end
   end
 
@@ -1180,6 +1237,8 @@ RSpec.describe "templates/invoices/v4.slim" do
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
     end
+
+    it_behaves_like "an invoice translated in every locale"
   end
 
   context "when invoice_type is progressive_billing with prepaid credits" do
@@ -1289,6 +1348,16 @@ RSpec.describe "templates/invoices/v4.slim" do
 
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
+    end
+
+    it_behaves_like "an invoice translated in every locale"
+
+    context "when invoice does not have any applied usage threshold" do
+      let(:applied_usage_threshold) { nil }
+
+      it "renders without the reached usage threshold line" do
+        expect(rendered_template).not_to include("This progressive billing is generated because your cumulative usage has reached")
+      end
     end
   end
 
@@ -1604,6 +1673,105 @@ RSpec.describe "templates/invoices/v4.slim" do
     end
   end
 
+  context "when charge fees have presentation breakdowns" do
+    let(:organization) { create(:organization, :with_static_values) }
+    let(:customer) { create(:customer, :with_static_values, organization:) }
+    let(:billable_metric) { create(:billable_metric, organization:) }
+
+    let(:plan) do
+      create(
+        :plan,
+        organization:,
+        interval: "monthly",
+        pay_in_advance: false,
+        invoice_display_name: "Plan with Breakdowns"
+      )
+    end
+
+    let(:subscription) { create(:subscription, customer:, plan:, status: "active") }
+
+    let(:charge) do
+      create(
+        :standard_charge,
+        plan:,
+        billable_metric:,
+        invoice_display_name: "Compute",
+        properties: {
+          "amount" => "100",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => true}},
+            {"value" => "env", "options" => {"display_in_invoice" => true}}
+          ]
+        }
+      )
+    end
+
+    let(:invoice) do
+      create(
+        :invoice,
+        customer:,
+        number: "LAGO-202509-009",
+        payment_due_date: Date.parse("2025-10-01"),
+        issuing_date: Date.parse("2025-09-01"),
+        invoice_type: :subscription,
+        total_amount_cents: 10000,
+        currency: "USD",
+        fees_amount_cents: 10000,
+        sub_total_excluding_taxes_amount_cents: 10000,
+        sub_total_including_taxes_amount_cents: 10000
+      )
+    end
+
+    let(:invoice_subscription) do
+      create(
+        :invoice_subscription,
+        invoice:,
+        subscription:,
+        from_datetime: Time.zone.parse("2025-08-01 00:00:00"),
+        to_datetime: Time.zone.parse("2025-08-31 23:59:59"),
+        charges_from_datetime: Time.zone.parse("2025-08-01 00:00:00"),
+        charges_to_datetime: Time.zone.parse("2025-08-31 23:59:59"),
+        fixed_charges_from_datetime: Time.zone.parse("2025-08-01 00:00:00"),
+        fixed_charges_to_datetime: Time.zone.parse("2025-08-31 23:59:59"),
+        timestamp: Time.zone.parse("2025-08-31 23:59:59")
+      )
+    end
+
+    let(:charge_fee) do
+      create(
+        :charge_fee,
+        invoice:,
+        subscription:,
+        charge:,
+        amount_cents: 10000,
+        amount_currency: "USD",
+        units: 100,
+        unit_amount_cents: 100,
+        precise_unit_amount: 1.00,
+        invoice_display_name: "Compute",
+        grouped_by: {},
+        properties: {
+          "timestamp" => "2025-08-31 23:59:59",
+          "charges_from_datetime" => "2025-08-01 00:00:00",
+          "charges_to_datetime" => "2025-08-31 23:59:59"
+        }
+      )
+    end
+
+    before do
+      invoice_subscription
+      charge_fee
+      create(:presentation_breakdown, fee: charge_fee, units: 60, presentation_by: {"region" => "us", "env" => "prod"})
+      create(:presentation_breakdown, fee: charge_fee, units: 40, presentation_by: {"region" => "eu", "env" => "prod"})
+    end
+
+    it "renders correctly" do
+      expect(rendered_template).to match_html_snapshot
+    end
+
+    it_behaves_like "an invoice translated in every locale"
+  end
+
   context "when invoice has multiple subscriptions with prepaid credits" do
     let(:organization) { create(:organization, :with_static_values) }
     let(:customer) { create(:customer, :with_static_values, organization:) }
@@ -1737,5 +1905,7 @@ RSpec.describe "templates/invoices/v4.slim" do
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
     end
+
+    it_behaves_like "an invoice translated in every locale"
   end
 end

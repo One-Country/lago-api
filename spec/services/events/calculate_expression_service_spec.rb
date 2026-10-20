@@ -12,7 +12,7 @@ RSpec.describe Events::CalculateExpressionService do
     let(:properties) { {"left" => "1", "right" => "2"} }
     let(:expression) { nil }
     let(:field_name) { "result" }
-    let(:billable_metric) { create(:billable_metric, organization: organization, code: code, field_name: field_name, expression: expression) }
+    let(:billable_metric) { create(:sum_billable_metric, organization: organization, code: code, field_name: field_name, expression: expression) }
 
     before do
       billable_metric
@@ -31,6 +31,16 @@ RSpec.describe Events::CalculateExpressionService do
       it "evaluates the expression and updates the event properties" do
         expect(service_call).to be_success
         expect(service_call.event.properties[field_name]).to eq(3)
+      end
+    end
+
+    context "when the expression divides by a property equal to zero" do
+      let(:expression) { "event.properties.left / event.properties.right" }
+      let(:properties) { {"left" => "1", "right" => "0"} }
+
+      it "returns a failure instead of raising" do
+        expect(service_call).not_to be_success
+        expect(service_call.error.code.to_s).to eq("expression_evaluation_failed")
       end
     end
   end

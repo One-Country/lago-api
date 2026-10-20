@@ -2,9 +2,9 @@
 
 module Wallets
   module RecurringTransactionRules
-    Result = BaseResult[:wallet, :payment_method]
-
     class UpdateService < BaseService
+      Result = BaseResult[:wallet, :payment_method]
+
       def initialize(wallet:, params:)
         @wallet = wallet
         @params = params
@@ -14,6 +14,7 @@ module Wallets
 
       def call
         return result unless valid_payment_methods?
+        return result unless valid_connections?
 
         created_recurring_rules_ids = []
 
@@ -33,7 +34,11 @@ module Wallets
             rule_attributes.delete(:payment_method)
           end
 
+          connections = rule_attributes.delete(:connections)
+
           recurring_rule = wallet.recurring_transaction_rules.active.find_by(id: lago_id)
+
+          normalize_grants_target_top_up!(rule_attributes, recurring_rule)
 
           if rule_attributes.key?(:invoice_custom_section)
             invoice_custom_section = {
@@ -50,6 +55,8 @@ module Wallets
             end
 
             recurring_rule.update!(rule_attributes)
+
+            attach_connections(recurring_rule, connections)
           else
             unless rule_attributes.key?(:invoice_requires_successful_payment)
               rule_attributes[:invoice_requires_successful_payment] = wallet.invoice_requires_successful_payment
@@ -66,6 +73,8 @@ module Wallets
               )
             end
 
+            attach_connections(created_recurring_rule, connections)
+
             created_recurring_rules_ids.push(created_recurring_rule.id)
           end
         end
@@ -75,6 +84,8 @@ module Wallets
 
         result.wallet = wallet
         result
+      rescue ActiveRecord::RecordInvalid => e
+        result.record_validation_failure!(record: e.record)
       rescue BaseService::FailedResult => e
         e.result
       end
@@ -97,9 +108,23 @@ module Wallets
         @hash_recurring_rules ||= params.map { |m| m.to_h.deep_symbolize_keys }
       end
 
+      def normalize_grants_target_top_up!(rule_attributes, recurring_rule)
+        effective_method = rule_attributes[:method]&.to_s || recurring_rule&.method
+
+        if effective_method == "target"
+          if rule_attributes.key?(:grants_target_top_up)
+            rule_attributes[:grants_target_top_up] = ActiveModel::Type::Boolean.new.cast(rule_attributes[:grants_target_top_up])
+          elsif recurring_rule&.grants_target_top_up.nil?
+            rule_attributes[:grants_target_top_up] = false
+          end
+        else
+          rule_attributes[:grants_target_top_up] = nil
+        end
+      end
+
       def valid_payment_methods?
         hash_recurring_rules.each do |payload_rule|
-          pm_result = BaseService::Result.new
+          pm_result = BaseResult[:payment_method].new
           pm_result.payment_method = payment_method(payload_rule)
 
           unless PaymentMethods::ValidateService.new(pm_result, **payload_rule).valid?
@@ -107,6 +132,28 @@ module Wallets
 
             return false
           end
+        end
+
+        true
+      end
+
+      def attach_connections(recurring_rule, connections)
+        return if connections.blank?
+
+        BillingObjectConnections::AttachToResourceService.call!(
+          resource: recurring_rule,
+          params: {connections:}
+        )
+      end
+
+      def valid_connections?
+        hash_recurring_rules.each do |payload_rule|
+          validator = BillingObjectConnections::ValidateService.new(result, **payload_rule)
+          next if validator.valid?
+
+          result.single_validation_failure!(field: :connections, error_code: validator.error_codes.first)
+
+          return false
         end
 
         true

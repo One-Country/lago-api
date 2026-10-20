@@ -5,13 +5,26 @@ require "rails_helper"
 RSpec.describe Webhooks::Invoices::CreatedService do
   subject(:webhook_service) { described_class.new(object: invoice) }
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
+
+  before_all do
+    create_default(:billable_metric)
+    create_default(:plan)
+  end
+
   let(:subscription) { create(:subscription, organization:) }
   let(:invoice) { create(:invoice, customer:, organization:) }
 
+  let(:charge) do
+    create(:standard_charge, properties: {
+      "amount" => "100",
+      "presentation_group_keys" => [{"value" => "department", "options" => {"display_in_invoice" => true}}]
+    })
+  end
+
   before do
-    create_list(:fee, 1, invoice:, presentation_breakdowns: [create(:presentation_breakdown)])
+    create(:charge_fee, charge:, invoice:, presentation_breakdowns: [build(:presentation_breakdown)])
     create_list(:fee, 3, invoice:)
     create_list(:credit, 4, invoice:)
   end

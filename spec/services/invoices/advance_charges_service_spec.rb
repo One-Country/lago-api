@@ -4,7 +4,8 @@ require "rails_helper"
 
 RSpec.describe Invoices::AdvanceChargesService do
   subject(:invoice_service) do
-    described_class.new(initial_subscriptions: subscriptions, billing_at:)
+    billing_contexts = subscriptions.map { |subscription| Billing::Context.from(subscription:) }
+    described_class.new(billing_contexts:, billing_at:)
   end
 
   let(:organization) { create(:organization) }
@@ -97,7 +98,7 @@ RSpec.describe Invoices::AdvanceChargesService do
           invoice_type: "advance_charges",
           currency: "EUR",
           issuing_date: billing_at.to_date,
-          skip_charges: true,
+          skip_charges: false,
           taxes_rate: (16.0 * 100 / 61).round(2)
         }))
 
@@ -124,6 +125,26 @@ RSpec.describe Invoices::AdvanceChargesService do
               created_at: result.invoice.created_at
             }
           )
+      end
+
+      context "with billing entity resolution" do
+        it "stamps the customer's billing_entity when subscription has none" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.billing_entity).to eq(customer.billing_entity)
+        end
+
+        context "when subscription has its own billing_entity" do
+          let(:other_billing_entity) { create(:billing_entity, organization:) }
+
+          before { subscription.update!(billing_entity: other_billing_entity) }
+
+          it "stamps the subscription's billing_entity on the invoice" do
+            invoice = invoice_service.call.invoice
+
+            expect(invoice.billing_entity).to eq(other_billing_entity)
+          end
+        end
       end
     end
 
@@ -155,13 +176,37 @@ RSpec.describe Invoices::AdvanceChargesService do
       end
     end
 
+    context "when succeeded fees belong to a standalone advance charge" do
+      let(:charge) do
+        create(:standard_charge, plan:, pay_in_advance: true, invoiceable: false, regroup_paid_fees: nil)
+      end
+      let(:standalone_fee) do
+        create(:charge_fee, :succeeded, organization:, subscription:, charge:, invoice: nil,
+          succeeded_at: billing_at - 1.day)
+      end
+
+      before do
+        standalone_fee
+        allow(Invoices::CreateGeneratingService).to receive(:call).and_call_original
+      end
+
+      it "does not create and roll back an invoice on each billing run" do
+        expect(invoice_service.call.invoice).to be_nil
+        expect(invoice_service.call.invoice).to be_nil
+        expect(Invoices::CreateGeneratingService).not_to have_received(:call)
+        expect(standalone_fee.reload.invoice_id).to be_nil
+      end
+    end
+
     context "when there is a successful non invoiceable paid in advance fees" do
       let(:billable_metric) { create(:sum_billable_metric, :recurring, organization:) }
+      let(:charge_plan) { plan }
+      let(:paid_fee_properties) { fee_boundaries }
 
       let(:charge) do
         create(
           :charge,
-          plan:,
+          plan: charge_plan,
           billable_metric:,
           prorated: true,
           pay_in_advance: true,
@@ -178,7 +223,7 @@ RSpec.describe Invoices::AdvanceChargesService do
           status: :terminated,
           terminated_at: Time.current,
           started_at: Time.current - 1.year,
-          plan:
+          plan: charge_plan
         })
       end
 
@@ -192,7 +237,7 @@ RSpec.describe Invoices::AdvanceChargesService do
           subscription: subscription_2,
           amount_cents: 999,
           taxes_amount_cents: 24,
-          properties: fee_boundaries,
+          properties: paid_fee_properties,
           charge:
         )
       end
@@ -215,7 +260,7 @@ RSpec.describe Invoices::AdvanceChargesService do
             invoice_type: "advance_charges",
             currency: "EUR",
             issuing_date: billing_at.to_date,
-            skip_charges: true
+            skip_charges: false
           )
 
         expect(result.invoice.invoice_subscriptions.count).to eq(1)
@@ -223,6 +268,239 @@ RSpec.describe Invoices::AdvanceChargesService do
         expect(sub.charges_to_datetime).to match_datetime fee_boundaries[:charges_to_datetime]
         expect(sub.charges_from_datetime).to match_datetime fee_boundaries[:charges_from_datetime]
         expect(sub.invoicing_reason).to eq "in_advance_charge_periodic"
+      end
+
+      context "when the terminated predecessor uses a different plan" do
+        let(:charge_plan) { create(:plan, organization:, interval: "monthly", pay_in_advance: true) }
+
+        it "invoices the predecessor's regrouped fee even without a regrouping charge on the current plan" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.fees).to contain_exactly(paid_in_advance_fee)
+          expect(paid_in_advance_fee.reload.invoice).to eq(invoice)
+        end
+      end
+
+      context "when the current subscription has a fee with a future charge boundary" do
+        let(:future_fee) do
+          create(:fee, :succeeded, organization:, subscription:, charge:, invoice: nil,
+            succeeded_at: billing_at - 1.day,
+            properties: fee_boundaries.merge(charges_to_datetime: billing_at + 1.day))
+        end
+
+        before { future_fee }
+
+        it "uses the original active context to exclude the fee despite a terminated predecessor" do
+          expect(invoice_service.call.invoice.fees).to contain_exactly(paid_in_advance_fee)
+          expect(future_fee.reload.invoice_id).to be_nil
+        end
+      end
+
+      context "when a terminated context starts billing an active successor" do
+        let(:subscription) do
+          create(:subscription, plan:, customer:, status: :terminated, terminated_at: billing_at - 1.day,
+            started_at:, subscription_at: started_at.to_date)
+        end
+        let(:subscription_2) do
+          create(:subscription, external_id: subscription.external_id, customer:, plan: charge_plan,
+            started_at:, subscription_at: started_at.to_date)
+        end
+        let(:paid_fee_properties) { fee_boundaries.merge(charges_to_datetime: billing_at + 1.day) }
+
+        it "uses the original terminated context to attach the selected successor's fee" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.fees).to contain_exactly(paid_in_advance_fee)
+        end
+      end
+
+      context "when a terminated subscription started after a backdated active subscription" do
+        let(:billing_at) { Time.zone.parse("2025-02-01T00:00:00") }
+        let(:started_at) { Time.zone.parse("2024-03-01T10:00:00") }
+
+        let(:subscription_2) do
+          create(
+            :subscription,
+            external_id: subscription.external_id,
+            customer:,
+            status: :terminated,
+            terminated_at: Time.zone.parse("2024-04-05T10:00:00"),
+            subscription_at: Date.new(2024, 3, 15),
+            started_at: Time.zone.parse("2024-03-15T10:00:00"),
+            plan:
+          )
+        end
+
+        it "stamps the invoice subscription with the current billing period" do
+          invoice_subscription = invoice_service.call.invoice.invoice_subscriptions.sole
+
+          expect(invoice_subscription).to have_attributes(
+            subscription: subscription_2,
+            charges_from_datetime: match_datetime("2025-01-01T00:00:00Z"),
+            charges_to_datetime: match_datetime("2025-01-31T23:59:59Z")
+          )
+        end
+      end
+    end
+
+    context "when re-expanded subscriptions carry different purchase order numbers" do
+      let(:billable_metric) { create(:sum_billable_metric, :recurring, organization:) }
+
+      let(:charge) do
+        create(
+          :charge,
+          plan:,
+          billable_metric:,
+          prorated: true,
+          pay_in_advance: true,
+          invoiceable: false,
+          regroup_paid_fees: "invoice",
+          properties: {amount: "1"}
+        )
+      end
+
+      let(:subscription) do
+        create(
+          :subscription,
+          plan:,
+          customer:,
+          subscription_at: started_at.to_date,
+          started_at:,
+          created_at: started_at,
+          purchase_order_number: "PO-1"
+        )
+      end
+
+      # Same external_id as `subscription` (an upgrade rotation), so the re-expansion
+      # by external_id pulls it in alongside `subscription` despite a different PO.
+      let(:subscription_2) do
+        create(
+          :subscription,
+          external_id: subscription.external_id,
+          customer:,
+          status: :terminated,
+          terminated_at: Time.current,
+          started_at: Time.current - 1.year,
+          plan:,
+          purchase_order_number: "PO-2"
+        )
+      end
+
+      before do
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription:, amount_cents: 100, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription: subscription_2, amount_cents: 200, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+      end
+
+      it "creates a separate advance-charges invoice per purchase order number" do
+        expect { invoice_service.call }
+          .to change { Invoice.where(invoice_type: :advance_charges).count }.by(2)
+
+        invoices = Invoice.where(invoice_type: :advance_charges)
+        expect(invoices.map(&:purchase_order_number)).to match_array(%w[PO-1 PO-2])
+        expect(invoices.find_by!(purchase_order_number: "PO-1").fees.pluck(:subscription_id)).to eq([subscription.id])
+        expect(invoices.find_by!(purchase_order_number: "PO-2").fees.pluck(:subscription_id)).to eq([subscription_2.id])
+      end
+    end
+
+    context "when re-expanded subscriptions share the same purchase order number" do
+      let(:billable_metric) { create(:sum_billable_metric, :recurring, organization:) }
+
+      let(:charge) do
+        create(
+          :charge,
+          plan:,
+          billable_metric:,
+          prorated: true,
+          pay_in_advance: true,
+          invoiceable: false,
+          regroup_paid_fees: "invoice",
+          properties: {amount: "1"}
+        )
+      end
+
+      let(:subscription) do
+        create(
+          :subscription,
+          plan:,
+          customer:,
+          subscription_at: started_at.to_date,
+          started_at:,
+          created_at: started_at,
+          purchase_order_number: "PO-1"
+        )
+      end
+
+      # Same external_id as `subscription` (an upgrade rotation), so the re-expansion
+      # by external_id pulls it in alongside `subscription`, sharing the same PO.
+      let(:subscription_2) do
+        create(
+          :subscription,
+          external_id: subscription.external_id,
+          customer:,
+          status: :terminated,
+          terminated_at: Time.current,
+          started_at: Time.current - 1.year,
+          plan:,
+          purchase_order_number: "PO-1"
+        )
+      end
+
+      before do
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription:, amount_cents: 100, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription: subscription_2, amount_cents: 200, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+      end
+
+      it "consolidates both subscriptions onto one invoice stamped with the shared PO" do
+        expect { invoice_service.call }
+          .to change { Invoice.where(invoice_type: :advance_charges).count }.by(1)
+
+        invoice = Invoice.where(invoice_type: :advance_charges).sole
+        expect(invoice.purchase_order_number).to eq("PO-1")
+        expect(invoice.invoice_subscriptions.count).to eq(2)
+      end
+    end
+
+    context "when re-expanded subscriptions have no purchase order number" do
+      let(:billable_metric) { create(:sum_billable_metric, :recurring, organization:) }
+
+      let(:charge) do
+        create(
+          :charge,
+          plan:,
+          billable_metric:,
+          prorated: true,
+          pay_in_advance: true,
+          invoiceable: false,
+          regroup_paid_fees: "invoice",
+          properties: {amount: "1"}
+        )
+      end
+
+      # Same external_id as `subscription` (an upgrade rotation); neither carries a PO.
+      let(:subscription_2) do
+        create(
+          :subscription,
+          external_id: subscription.external_id,
+          customer:,
+          status: :terminated,
+          terminated_at: Time.current,
+          started_at: Time.current - 1.year,
+          plan:
+        )
+      end
+
+      before do
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription:, amount_cents: 100, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+        create(:fee, :succeeded, organization_id: organization.id, succeeded_at: fee_boundaries[:charges_to_datetime] - 2.days, invoice_id: nil, subscription: subscription_2, amount_cents: 200, taxes_amount_cents: 0, properties: fee_boundaries, charge:)
+      end
+
+      it "consolidates both subscriptions onto one invoice with no PO" do
+        expect { invoice_service.call }
+          .to change { Invoice.where(invoice_type: :advance_charges).count }.by(1)
+
+        invoice = Invoice.where(invoice_type: :advance_charges).sole
+        expect(invoice.purchase_order_number).to be_nil
+        expect(invoice.invoice_subscriptions.count).to eq(2)
       end
     end
 

@@ -5,19 +5,34 @@ require "rails_helper"
 RSpec.describe BillableMetrics::Aggregations::UniqueCountService, transaction: false do
   subject(:count_service) do
     described_class.new(
-      event_store_class:,
-      charge:,
-      subscription:,
-      boundaries: {
-        from_datetime:,
-        to_datetime:
-      },
+      event_store:,
+      metered_item:,
+      billing_context:,
+      boundaries:,
       filters:,
       bypass_aggregation:
     )
   end
 
   let(:event_store_class) { Events::Stores::PostgresStore }
+  let(:metered_item) do
+    Fees::ChargeService::MeteredItem.from_charge(
+      charge:,
+      boundaries: BillingPeriodBoundaries.new(
+        from_datetime:,
+        to_datetime:,
+        charges_from_datetime: from_datetime,
+        charges_to_datetime: to_datetime,
+        charges_duration: (to_datetime.to_date - from_datetime.to_date).to_i + 1,
+        timestamp: to_datetime
+      )
+    )
+  end
+  let(:boundaries) { {from_datetime:, to_datetime:} }
+  let(:billing_context) { Billing::Context.from(subscription:) }
+  let(:event_store) do
+    event_store_class.new(code: billable_metric.code, billing_context:, boundaries:, filters:)
+  end
   let(:bypass_aggregation) { false }
   let(:filters) do
     {event: pay_in_advance_event, grouped_by:, presentation_by:, charge_filter:, matching_filters:, ignored_filters:}
@@ -457,6 +472,19 @@ RSpec.describe BillableMetrics::Aggregations::UniqueCountService, transaction: f
         expect(result.pay_in_advance_aggregation).to eq(0)
       end
 
+      context "with presentation group keys" do
+        let(:presentation_by) { ["cloud", "region"] }
+        let(:properties) { {"unique_id" => "002", "cloud" => "aws", "region" => "eu"} }
+
+        it "assigns pay_in_advance_breakdowns based on the pay_in_advance event" do
+          result = count_service.aggregate
+
+          expect(result.pay_in_advance_breakdowns).to eq([
+            {groups: {"cloud" => "aws", "region" => "eu"}, value: 1}
+          ])
+        end
+      end
+
       context "when charge filter is used" do
         let(:properties) { {unique_id: "111", region: "europe"} }
 
@@ -589,6 +617,15 @@ RSpec.describe BillableMetrics::Aggregations::UniqueCountService, transaction: f
         expect(result.count).to eq(0)
         expect(result.current_usage_units).to eq(0)
         expect(result.options).to eq({running_total: []})
+      end
+    end
+
+    context "when bypass_aggregation is set to true and metric is recurring" do
+      let(:bypass_aggregation) { true }
+
+      it "ignores the bypass and aggregates the events" do
+        expect(result.aggregation).to eq(1)
+        expect(result.count).to eq(1)
       end
     end
   end
@@ -760,6 +797,33 @@ RSpec.describe BillableMetrics::Aggregations::UniqueCountService, transaction: f
         expect(aggregation.aggregation).to eq(0)
         expect(aggregation.count).to eq(0)
         expect(aggregation.grouped_by).to eq({"agent_name" => nil})
+      end
+    end
+
+    context "when bypass_aggregation is set to true and metric is recurring" do
+      let(:bypass_aggregation) { true }
+
+      let(:unique_count_event) do
+        create(
+          :event,
+          organization_id: organization.id,
+          code: billable_metric.code,
+          external_customer_id: customer.external_id,
+          external_subscription_id: subscription.external_id,
+          timestamp: added_at,
+          properties: {unique_id: SecureRandom.uuid, agent_name: "aragorn"}
+        )
+      end
+
+      it "ignores the bypass and aggregates the events" do
+        result = count_service.aggregate
+
+        expect(result.aggregations.count).to eq(1)
+
+        aggregation = result.aggregations.first
+        expect(aggregation.aggregation).to eq(1)
+        expect(aggregation.count).to eq(1)
+        expect(aggregation.grouped_by).to eq({"agent_name" => "aragorn"})
       end
     end
 

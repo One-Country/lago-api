@@ -3,6 +3,8 @@
 module Auth
   module Okta
     class BaseService < BaseService
+      include Auth::SsoIntegrationChecks
+
       private
 
       def check_code
@@ -32,6 +34,14 @@ module Auth
         result.okta_integration = okta_integration
       end
 
+      def sso_integration
+        result.okta_integration
+      end
+
+      def sso_login_method
+        Organizations::AuthenticationMethods::OKTA
+      end
+
       def check_invite(email)
         invite = Invite.pending.find_by(token: invite_token)
 
@@ -47,16 +57,16 @@ module Auth
           client_secret: result.okta_integration.client_secret,
           grant_type: "authorization_code",
           code:,
-          redirect_uri: "#{ENV["LAGO_FRONT_URL"]}/auth/okta/callback"
+          redirect_uri: "#{Rails.application.config.lago_front_url}/auth/okta/callback"
         }
 
-        token_client = LagoHttpClient::Client.new("https://#{result.okta_integration.host}/oauth2/v1/token")
+        token_client = LagoHttpClient::Client.new("https://#{result.okta_integration.host}/oauth2/v1/token", block_private_addresses: true)
         response = token_client.post_url_encoded(params, {})
         result.okta_access_token = response["access_token"]
       end
 
       def check_userinfo(email)
-        userinfo_client = LagoHttpClient::Client.new("https://#{result.okta_integration.host}/oauth2/v1/userinfo")
+        userinfo_client = LagoHttpClient::Client.new("https://#{result.okta_integration.host}/oauth2/v1/userinfo", block_private_addresses: true)
         userinfo_headers = {"Authorization" => "Bearer #{result.okta_access_token}"}
         response = userinfo_client.get(headers: userinfo_headers)
 

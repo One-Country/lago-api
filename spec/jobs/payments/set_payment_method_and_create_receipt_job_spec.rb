@@ -3,12 +3,17 @@
 require "rails_helper"
 
 RSpec.describe Payments::SetPaymentMethodAndCreateReceiptJob do
+  before_all do
+    create_default(:organization)
+    create_default(:invoice)
+  end
+
   let(:payment) { create(:payment) }
   let(:provider_payment_method_id) { "pm_001" }
 
   before do
     allow(Payments::SetPaymentMethodDataService)
-      .to receive(:call!).with(payment:, provider_payment_method_id:).and_return(BaseService::Result.new)
+      .to receive(:call!).with(payment:, provider_payment_method_id:).and_return(Payments::SetPaymentMethodDataService::Result.new)
   end
 
   it "calls the service" do

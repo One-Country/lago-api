@@ -11,6 +11,8 @@ RSpec.describe ::V1::PlanSerializer do
     )
   end
 
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:billable_metric) { create_default(:billable_metric) }
   let(:plan) { create(:plan) }
   let(:customer) { create(:customer, organization: plan.organization) }
   let(:subscription) { create(:subscription, customer:, plan:) }
@@ -158,6 +160,16 @@ RSpec.describe ::V1::PlanSerializer do
           }
         ]
       })
+    end
+
+    context "when the entitlement feature is discarded" do
+      before { feature.discard! }
+
+      it "does not serialize the orphaned entitlement" do
+        result = JSON.parse(serializer.to_json)
+
+        expect(result["plan"]["entitlements"]).to be_empty
+      end
     end
   end
 

@@ -2,6 +2,8 @@
 
 module Fees
   class ApplyTaxesService < BaseService
+    Result = BaseResult[:applied_taxes]
+
     def initialize(fee:, tax_codes: nil, customer: nil, plan: nil)
       @fee = fee
       @tax_codes = tax_codes
@@ -62,6 +64,7 @@ module Fees
     def applicable_taxes
       # organization.taxes - are all taxes created on the organization
       return customer.organization.taxes.where(code: tax_codes) if tax_codes
+      return product_taxes if fee.product?
       return fee.add_on.taxes if fee.add_on? && fee.add_on.taxes.any?
       return fee.charge.taxes if fee.charge? && fee.charge.taxes.any?
       return fee.fixed_charge.taxes if fee.fixed_charge? && fee.fixed_charge.taxes.any?
@@ -72,7 +75,20 @@ module Fees
       return customer.taxes if customer.taxes.any?
 
       # billing_entity.taxes - are the default taxes applied on the billing entity
-      customer.billing_entity.taxes
+      billing_entity_taxes(customer.billing_entity_id)
+    end
+
+    def product_taxes
+      rate_card_taxes = fee.rate_card_rate.rate_card.taxes
+      return rate_card_taxes if rate_card_taxes.any?
+      return plan.taxes if plan&.taxes&.any?
+      return customer.taxes if customer.taxes.any?
+
+      billing_entity_taxes(fee.billing_entity_id)
+    end
+
+    def billing_entity_taxes(billing_entity_id)
+      Tax.joins(:billing_entities_taxes).where(billing_entities_taxes: {billing_entity_id:})
     end
   end
 end

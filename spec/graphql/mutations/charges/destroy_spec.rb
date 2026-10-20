@@ -3,13 +3,11 @@
 require "rails_helper"
 
 RSpec.describe Mutations::Charges::Destroy, type: :graphql do
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
   let(:required_permission) { "charges:delete" }
-  let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
-  let(:billable_metric) { create(:billable_metric, organization:) }
   let(:charge) { create(:standard_charge, plan:, billable_metric:) }
-
   let(:mutation) do
     <<~GQL
       mutation($input: DestroyChargeInput!) {
@@ -19,6 +17,10 @@ RSpec.describe Mutations::Charges::Destroy, type: :graphql do
       }
     GQL
   end
+
+  let_it_be(:membership, refind: true) { create_default(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:billable_metric) { create_default(:billable_metric, organization:) }
 
   it_behaves_like "requires current user"
   it_behaves_like "requires current organization"
@@ -47,10 +49,7 @@ RSpec.describe Mutations::Charges::Destroy, type: :graphql do
     let(:child_plan) { create(:plan, organization:, parent: plan) }
     let(:child_charge) { create(:standard_charge, plan: child_plan, organization:, billable_metric:, parent: charge) }
 
-    before do
-      child_charge
-      allow(Charges::DestroyChildrenJob).to receive(:perform_later)
-    end
+    before { child_charge }
 
     it "cascades the deletion to children" do
       execute_graphql(
@@ -66,7 +65,7 @@ RSpec.describe Mutations::Charges::Destroy, type: :graphql do
         }
       )
 
-      expect(Charges::DestroyChildrenJob).to have_received(:perform_later).with(charge.id)
+      expect(Charges::DestroyChildrenJob).to have_been_enqueued.with(charge.id)
     end
   end
 

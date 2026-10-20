@@ -4,20 +4,14 @@ require "rails_helper"
 
 RSpec.describe Mutations::Plans::Update do
   let(:required_permission) { "plans:update" }
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
   let(:minimum_commitment_invoice_display_name) { "Minimum spending" }
   let(:minimum_commitment_amount_cents) { 100 }
   let(:commitment_tax) { create(:tax, organization:) }
-
   let(:feature) { create(:feature, code: :seats, organization:) }
   let(:privilege) { create(:privilege, feature:, code: "max", value_type: "integer") }
   let(:entitlement) { create(:entitlement, feature:, plan:) }
   let(:entitlement_value) { create(:entitlement_value, privilege:, entitlement:, value: "99") }
-
   let(:feature2) { create(:feature, code: "sso", organization:) }
-
   let(:mutation) do
     <<~GQL
       mutation($input: UpdatePlanInput!) {
@@ -91,11 +85,6 @@ RSpec.describe Mutations::Plans::Update do
       }
     GQL
   end
-
-  let(:billable_metrics) do
-    create_list(:billable_metric, 5, organization:)
-  end
-
   let(:billable_metric_filter) do
     create(
       :billable_metric_filter,
@@ -104,10 +93,8 @@ RSpec.describe Mutations::Plans::Update do
       values: %w[card sepa]
     )
   end
-
   let(:minimum_commitment) { create(:commitment, :minimum_commitment, plan:) }
   let(:pricing_unit) { create(:pricing_unit, organization:) }
-
   let(:graphql) do
     {
       current_user: membership.user,
@@ -240,6 +227,14 @@ RSpec.describe Mutations::Plans::Update do
         }
       }
     }
+  end
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:membership, refind: true) { create_default(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+
+  let_it_be(:billable_metrics) do
+    create_list(:billable_metric, 5, organization:)
   end
 
   before do
@@ -456,7 +451,7 @@ RSpec.describe Mutations::Plans::Update do
   context "when entitlements is an empty array" do
     it "calls PlanEntitlementsUpdateService to remove all entitlements" do
       allow(::Entitlement::PlanEntitlementsUpdateService).to receive(:call)
-        .and_return(BaseService::Result.new)
+        .and_return(::Entitlement::PlanEntitlementsUpdateService::Result.new)
 
       execute_graphql(
         current_user: membership.user,
@@ -482,8 +477,111 @@ RSpec.describe Mutations::Plans::Update do
         organization: organization,
         plan:,
         entitlements_params: {},
-        partial: false
+        partial: false,
+        send_webhook: false
       )
+    end
+  end
+
+  context "with the plan.updated webhook" do
+    let(:base_input) do
+      {
+        id: plan.id,
+        name: "Updated plan",
+        code: "updated_plan",
+        interval: "monthly",
+        payInAdvance: false,
+        amountCents: 200,
+        amountCurrency: "EUR",
+        charges: []
+      }
+    end
+
+    context "when entitlements are not provided" do
+      it "enqueues a single plan.updated webhook" do
+        execute_graphql(
+          current_user: membership.user,
+          current_organization: organization,
+          permissions: required_permission,
+          query: mutation,
+          variables: {input: base_input}
+        )
+
+        expect(SendWebhookJob).to have_been_enqueued.with("plan.updated", plan).once
+      end
+    end
+
+    context "when entitlements are provided", :premium do
+      let(:input_with_entitlements) do
+        base_input.merge(
+          entitlements: [
+            {featureCode: feature.code, privileges: [{privilegeCode: privilege.code, value: "22"}]}
+          ]
+        )
+      end
+
+      it "enqueues a single plan.updated webhook" do
+        execute_graphql(
+          current_user: membership.user,
+          current_organization: organization,
+          permissions: required_permission,
+          query: mutation,
+          variables: {input: input_with_entitlements}
+        )
+
+        expect(SendWebhookJob).to have_been_enqueued.with("plan.updated", plan).once
+      end
+
+      it "does not emit the webhook from Plans::UpdateService so entitlements are persisted first" do
+        allow(::Plans::UpdateService).to receive(:call).and_call_original
+
+        execute_graphql(
+          current_user: membership.user,
+          current_organization: organization,
+          permissions: required_permission,
+          query: mutation,
+          variables: {input: input_with_entitlements}
+        )
+
+        expect(::Plans::UpdateService).to have_received(:call).with(plan:, params: anything, send_webhook: false)
+      end
+    end
+  end
+
+  context "when charges are not provided" do
+    let(:existing_charge) do
+      create(:standard_charge, plan:, billable_metric: billable_metrics[0], properties: {amount: "42.00"})
+    end
+
+    before do
+      existing_charge
+    end
+
+    it "updates the plan without changing charges" do
+      result = execute_graphql(
+        current_user: membership.user,
+        current_organization: membership.organization,
+        permissions: required_permission,
+        query: mutation,
+        variables: {
+          input: {
+            id: plan.id,
+            name: "Updated plan",
+            code: "updated_plan",
+            interval: "monthly",
+            payInAdvance: true,
+            amountCents: 200,
+            amountCurrency: "EUR"
+          }
+        }
+      )
+
+      result_data = result["data"]["updatePlan"]
+
+      expect(result_data["name"]).to eq("Updated plan")
+      expect(result_data["charges"].count).to eq(1)
+      expect(result_data["charges"].first["id"]).to eq(existing_charge.id)
+      expect(result_data["charges"].first["properties"]["amount"]).to eq("42.00")
     end
   end
 
@@ -522,7 +620,7 @@ RSpec.describe Mutations::Plans::Update do
   end
 
   context "when fixed charges are provided" do
-    let(:add_ons) { create_list(:add_on, 5, organization:) }
+    let_it_be(:add_ons, refind: true) { create_list(:add_on, 5, organization:) }
     let(:add_on_1) { add_ons[0] }
     let(:add_on_2) { add_ons[1] }
     let(:add_on_3) { add_ons[2] }

@@ -5,6 +5,9 @@ require "rails_helper"
 RSpec.describe AppliedCoupon do
   subject(:applied_coupon) { create(:applied_coupon) }
 
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
+
   it_behaves_like "paper_trail traceable"
 
   describe "associations" do
@@ -71,6 +74,14 @@ RSpec.describe AppliedCoupon do
 
     context "when invoice is voided" do
       let(:invoice) { create(:invoice, status: :voided) }
+
+      it "ignores the credit amount" do
+        expect(applied_coupon.remaining_amount).to eq(50)
+      end
+    end
+
+    context "when invoice is closed" do
+      let(:invoice) { create(:invoice, status: :closed) }
 
       it "ignores the credit amount" do
         expect(applied_coupon.remaining_amount).to eq(50)

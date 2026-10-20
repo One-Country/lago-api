@@ -6,13 +6,8 @@ RSpec.describe Mutations::Subscriptions::UpdateCharge, :premium do
   subject { execute_query(query:, input:) }
 
   let(:required_permission) { "subscriptions:update" }
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
-  let(:billable_metric) { create(:billable_metric, organization:) }
   let(:charge) { create(:standard_charge, plan:, organization:, billable_metric:) }
   let(:subscription) { create(:subscription, organization:, plan:) }
-
   let(:query) do
     <<~GQL
       mutation($input: UpdateSubscriptionChargeInput!) {
@@ -28,7 +23,6 @@ RSpec.describe Mutations::Subscriptions::UpdateCharge, :premium do
       }
     GQL
   end
-
   let(:input) do
     {
       subscriptionId: subscription.id,
@@ -39,12 +33,19 @@ RSpec.describe Mutations::Subscriptions::UpdateCharge, :premium do
     }
   end
 
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:billable_metric) { create_default(:billable_metric, organization:) }
+  let_it_be(:customer, refind: true) { create_default(:customer) }
+  let_it_be(:membership, refind: true) { create_default(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+
   before do
     charge
     subscription
   end
 
   it_behaves_like "requires current user"
+  it_behaves_like "requires current organization"
   it_behaves_like "requires permission", "subscriptions:update"
 
   it "creates a plan override and charge override" do
@@ -116,6 +117,34 @@ RSpec.describe Mutations::Subscriptions::UpdateCharge, :premium do
       expect(result_data["id"]).to eq(overridden_charge.id)
       expect(result_data["invoiceDisplayName"]).to eq("Updated Charge")
       expect(result_data["minAmountCents"]).to eq("500")
+    end
+  end
+
+  context "with filters" do
+    let(:billable_metric_filter) { create(:billable_metric_filter, billable_metric:, organization:, key: "region", values: %w[us eu]) }
+    let(:input) do
+      {
+        subscriptionId: subscription.id,
+        chargeCode: charge.code,
+        properties: {amount: "1"},
+        filters: [
+          {
+            invoiceDisplayName: "EU",
+            properties: {amount: "11"},
+            values: {billable_metric_filter.key => %w[eu]}
+          }
+        ]
+      }
+    end
+
+    before { billable_metric_filter }
+
+    it "creates the charge override with its filters" do
+      result_data = subject["data"]["updateSubscriptionCharge"]
+
+      override = Charge.find(result_data["id"])
+      expect(override.filters.count).to eq(1)
+      expect(override.filters.first.properties).to eq("amount" => "11")
     end
   end
 

@@ -3,6 +3,8 @@
 require "rails_helper"
 
 RSpec.describe Resolvers::TaxesResolver do
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
   let(:query) do
     <<~GQL
       query {
@@ -13,10 +15,10 @@ RSpec.describe Resolvers::TaxesResolver do
       }
     GQL
   end
-
-  let(:membership) { create(:membership) }
   let(:organization) { membership.organization }
   let(:tax) { create(:tax, organization:) }
+
+  let_it_be(:membership) { create_default(:membership) }
 
   before { tax }
 
@@ -38,6 +40,33 @@ RSpec.describe Resolvers::TaxesResolver do
       "currentPage" => 1,
       "totalCount" => 1
     )
+  end
+
+  context "when a tax is applied to the default billing entity" do
+    let(:query) do
+      <<~GQL
+        query {
+          taxes(limit: 5) {
+            collection { id appliedToOrganization appliedToBillingEntitiesCodes }
+          }
+        }
+      GQL
+    end
+
+    let(:tax) { create(:tax, :applied_to_billing_entity, organization:) }
+
+    it "resolves applied_to_organization from the billing entity join" do
+      result = execute_graphql(
+        current_user: membership.user,
+        current_organization: organization,
+        query:
+      )
+
+      tax_response = result["data"]["taxes"]["collection"].first
+
+      expect(tax_response["appliedToOrganization"]).to eq(true)
+      expect(tax_response["appliedToBillingEntitiesCodes"]).to eq([organization.default_billing_entity.code])
+    end
   end
 
   context "without current organization" do

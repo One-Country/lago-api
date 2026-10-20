@@ -20,6 +20,7 @@ module Types
       field :payment_dispute_losable, Boolean, null: false, method: :payment_dispute_losable?
       field :payment_dispute_lost_at, GraphQL::Types::ISO8601DateTime
       field :payment_status, Types::Invoices::PaymentStatusTypeEnum, null: false
+      field :purchase_order_number, String, null: true
       field :status, Types::Invoices::StatusTypeEnum, null: false
       field :tax_status, Types::Invoices::TaxStatusTypeEnum, null: true
       field :voidable, Boolean, null: false, method: :voidable?
@@ -64,9 +65,9 @@ module Types
       field :file_url, String, null: true
       field :xml_url, String, null: true
 
-      field :metadata, [Types::Invoices::Metadata::Object], null: true
+      field :metadata, [Types::Invoices::Metadata::Object], null: true, permissions: %w[invoices:view invoices:update]
 
-      field :activity_logs, [Types::ActivityLogs::Object], null: true
+      field :activity_logs, [Types::ActivityLogs::Object], null: true, permission: "audit_logs:view"
       field :applied_taxes, [Types::Invoices::AppliedTaxes::Object]
       field :credit_notes, [Types::CreditNotes::Object], null: true
       field :error_details, [Types::ErrorDetails::Object], null: true
@@ -81,7 +82,7 @@ module Types
       field :integration_salesforce_syncable, GraphQL::Types::Boolean, null: false
       field :integration_syncable, GraphQL::Types::Boolean, null: false
       field :payable_type, GraphQL::Types::String, null: false
-      field :payments, [Types::Payments::Object], null: true
+      field :payments, [Types::Payments::Object], null: true, method: :customer_payments
       field :regenerated_invoice_id, String, null: true
       field :tax_provider_id, String, null: true
       field :tax_provider_voidable, GraphQL::Types::Boolean, null: false
@@ -97,11 +98,11 @@ module Types
       end
 
       def applied_taxes
-        object.applied_taxes.order(tax_rate: :desc)
-      end
-
-      def payments
-        object.payments.where.not(customer_id: nil).order(updated_at: :desc)
+        if object.applied_taxes.any? { |applied_tax| !applied_tax.persisted? }
+          object.applied_taxes.sort_by { |applied_tax| -applied_tax.tax_rate.to_f }
+        else
+          object.applied_taxes.order(tax_rate: :desc)
+        end
       end
 
       def integration_syncable

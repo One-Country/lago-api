@@ -2,6 +2,8 @@
 
 module Coupons
   class DestroyService < BaseService
+    Result = BaseResult[:coupon]
+
     def initialize(coupon:)
       @coupon = coupon
       super
@@ -25,6 +27,7 @@ module Coupons
       end
 
       result.coupon = coupon
+      SendWebhookJob.perform_after_commit("coupon.deleted", coupon)
       result
     end
 

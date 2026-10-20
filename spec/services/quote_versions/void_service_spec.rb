@@ -5,7 +5,12 @@ require "rails_helper"
 RSpec.describe QuoteVersions::VoidService do
   subject(:void_service) { described_class.new(quote_version:, reason:) }
 
-  let(:organization) { create(:organization, feature_flags: ["order_forms"]) }
+  let_it_be(:organization) { create_default(:organization, feature_flags: ["order_forms"]) }
+
+  before_all do
+    create_default(:customer)
+  end
+
   let(:quote_version) { create(:quote_version, organization:) }
   let(:reason) { "manual" }
 
@@ -19,9 +24,57 @@ RSpec.describe QuoteVersions::VoidService do
           expect(result.quote_version.voided?).to eq(true)
           expect(result.quote_version.void_reason).to eq(reason)
           expect(result.quote_version.voided_at).to eq(Time.current)
-          expect(result.quote_version.share_token).to eq(nil)
           expect(result.quote_version.approved_at).to eq(nil)
         end
+      end
+
+      it "enqueues a quote.voided webhook" do
+        expect { void_service.call }
+          .to have_enqueued_job_after_commit(SendWebhookJob)
+          .with("quote.voided", quote_version)
+      end
+
+      it "produces a quote.voided activity log" do
+        void_service.call
+
+        expect(Utils::ActivityLog).to have_produced("quote.voided").after_commit.with(quote_version)
+      end
+    end
+
+    context "when the version is superseded by a clone", :premium do
+      let(:reason) { "superseded" }
+
+      it "enqueues a quote.voided webhook for the superseded version" do
+        expect { void_service.call }
+          .to have_enqueued_job_after_commit(SendWebhookJob)
+          .with("quote.voided", quote_version)
+
+        expect(quote_version.reload.void_reason).to eq("superseded")
+      end
+
+      it "produces a quote.voided activity log for the superseded version" do
+        void_service.call
+
+        expect(Utils::ActivityLog).to have_produced("quote.voided").after_commit.with(quote_version)
+      end
+    end
+
+    context "with concurrent mutations", :premium do
+      it "wraps the work in a per-quote lock" do
+        allow(Quotes::LockService).to receive(:call).and_call_original
+
+        result
+
+        expect(Quotes::LockService).to have_received(:call).with(quote: quote_version.quote).at_least(:once)
+      end
+
+      it "re-checks the status under the lock and refuses a stale void" do
+        quote_version
+        QuoteVersion.find(quote_version.id).update!(status: :approved, approved_at: Time.current)
+
+        expect(result).not_to be_success
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq({status: ["not_voidable"]})
       end
     end
 
@@ -30,18 +83,32 @@ RSpec.describe QuoteVersions::VoidService do
 
       it "is not voidable" do
         expect(result).not_to be_success
-        expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
-        expect(result.error.code).to eq("inappropriate_state")
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq({status: ["not_voidable"]})
+      end
+    end
+
+    context "when quote version is approved and reason is a cascade", :premium do
+      let(:quote_version) { create(:quote_version, :approved, organization:) }
+      let(:reason) { "cascade_of_expired" }
+
+      it "voids the quote version" do
+        freeze_time do
+          expect(result).to be_success
+          expect(result.quote_version.voided?).to eq(true)
+          expect(result.quote_version.void_reason).to eq("cascade_of_expired")
+          expect(result.quote_version.voided_at).to eq(Time.current)
+        end
       end
     end
 
     context "when quote isn't voidable", :premium do
       let(:quote_version) { create(:quote_version, :voided, organization:) }
 
-      it "returns method not allowed" do
+      it "returns a validation failure" do
         expect(result).not_to be_success
-        expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
-        expect(result.error.code).to eq("inappropriate_state")
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq({status: ["not_voidable"]})
       end
     end
 
@@ -82,6 +149,18 @@ RSpec.describe QuoteVersions::VoidService do
         expect(result).not_to be_success
         expect(result.error).to be_a(BaseService::ForbiddenFailure)
         expect(result.error.code).to eq("feature_unavailable")
+      end
+    end
+
+    context "when the quote lock cannot be acquired", :premium do
+      before do
+        allow(Quotes::LockService).to receive(:call).and_raise(BaseLockService::FailedToAcquireLock)
+      end
+
+      it "returns a concurrency conflict instead of raising" do
+        expect(result).not_to be_success
+        expect(result.error).to be_a(BaseService::ValidationFailure)
+        expect(result.error.messages).to eq(base: ["concurrency_conflict"])
       end
     end
   end

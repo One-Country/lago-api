@@ -27,6 +27,8 @@ module Types
       field :current_billing_period_ending_at, GraphQL::Types::ISO8601DateTime
       field :current_billing_period_started_at, GraphQL::Types::ISO8601DateTime
 
+      field :connections, [Types::Connections::Object], null: false, method: :connection_routing
+
       field :selected_invoice_custom_sections, [Types::InvoiceCustomSections::Object], null: true
       field :skip_invoice_custom_sections, Boolean
 
@@ -42,7 +44,7 @@ module Types
       field :previous_plan, Types::Plans::Object
       field :previous_subscription, Types::Subscriptions::Object
 
-      field :activity_logs, [Types::ActivityLogs::Object], null: true
+      field :activity_logs, [Types::ActivityLogs::Object], null: true, permission: "audit_logs:view"
       field :charges, [Types::Charges::Object], null: true
       field :fees, [Types::Fees::Object], null: true
       field :fixed_charges, [Types::FixedCharges::Object], null: true
@@ -55,10 +57,11 @@ module Types
       field :payment_method, Types::PaymentMethods::Object
       field :payment_method_type, Types::PaymentMethods::MethodTypeEnum
       field :progressive_billing_disabled, Boolean
+      field :purchase_order_number, String, null: true
 
       field :activated_at, GraphQL::Types::ISO8601DateTime, null: true
       field :activation_rules, [Types::Subscriptions::ActivationRuleType], null: false
-      field :cancelation_reason, Types::Subscriptions::CancelationReasonEnum, null: true
+      field :cancellation_reason, Types::Subscriptions::CancellationReasonEnum, null: true
 
       def next_plan
         object.next_subscription&.plan
@@ -85,7 +88,7 @@ module Types
       end
 
       def period_end_date
-        ::Subscriptions::DatesService.new_instance(object, Time.current)
+        ::Subscriptions::DatesService.new_instance(object, object.billing_reference_time)
           .next_end_of_period
       end
 
@@ -96,11 +99,11 @@ module Types
       end
 
       def current_billing_period_started_at
-        dates_service.charges_from_datetime
+        dates_service&.charges_from_datetime
       end
 
       def current_billing_period_ending_at
-        dates_service.charges_to_datetime
+        dates_service&.charges_to_datetime
       end
 
       def charges
@@ -110,13 +113,22 @@ module Types
       end
 
       def fixed_charges
-        object.plan.fixed_charges
+        fcs = object.plan.fixed_charges
           .includes(:add_on, :taxes)
           .order(created_at: :asc)
+
+        effective_units_by_id = ::Subscription::FixedChargeUnitsOverride.units_map_for(
+          subscription: object,
+          fixed_charges: fcs
+        )
+
+        fcs.map do |fc|
+          ::Subscription::FixedChargePresenter.new(fc, object, effective_units: effective_units_by_id[fc.id])
+        end
       end
 
       def dates_service
-        @dates_service ||= ::Subscriptions::DatesService.new_instance(object, Time.current, current_usage: true)
+        @dates_service ||= ::Subscriptions::DatesService.new_instance(object, object.billing_reference_time, current_usage: true)
       end
     end
   end

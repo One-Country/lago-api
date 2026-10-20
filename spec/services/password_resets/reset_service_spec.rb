@@ -8,8 +8,8 @@ RSpec.describe PasswordResets::ResetService do
   include_context "with mocked security logger"
 
   describe "#call" do
-    let(:organization) { create(:organization) }
-    let(:membership) { create(:membership, organization:) }
+    let_it_be(:organization, refind: true) { create(:organization) }
+    let_it_be(:membership, refind: true) { create(:membership, organization:) }
     let(:user) { membership.user }
     let(:password_reset) { create(:password_reset, user:) }
     let(:reset_args) do
@@ -28,14 +28,10 @@ RSpec.describe PasswordResets::ResetService do
     end
 
     it "logs in the user" do
-      allow(SegmentIdentifyJob).to receive(:perform_later)
-
       result = reset_service.call(**reset_args)
 
-      data = result["user"]
-
-      expect(data).to be_present
-      expect(SegmentIdentifyJob).to have_received(:perform_later).with(
+      expect(result.user).to be_present
+      expect(SegmentIdentifyJob).to have_been_enqueued.with(
         membership_id: "membership/#{membership.id}"
       )
     end

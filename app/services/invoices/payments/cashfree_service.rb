@@ -4,18 +4,20 @@ module Invoices
   module Payments
     class CashfreeService < BaseService
       include Customers::PaymentProviderFinder
+      include TypedResults
 
       PROVIDER_NAME = "Cashfree"
 
-      def initialize(invoice = nil)
-        @invoice = invoice
+      RESULTS = {
+        update_payment_status: BaseResult[:payment, :invoice],
+        generate_payment_url: BaseResult[:payment_url]
+      }.freeze
 
-        super
-      end
+      private
 
-      def update_payment_status(organization_id:, status:, cashfree_payment:)
+      def update_payment_status(organization_id:, status:, cashfree_payment:, amount_cents: nil)
         payment = if cashfree_payment.metadata[:payment_type] == "one-time"
-          create_payment(cashfree_payment)
+          create_payment(cashfree_payment, amount_cents:)
         else
           Payment.find_by(provider_payment_id: cashfree_payment.id)
         end
@@ -42,7 +44,8 @@ module Invoices
         result.fail_with_error!(e)
       end
 
-      def generate_payment_url(payment_intent)
+      def generate_payment_url(invoice, payment_intent)
+        @invoice = invoice
         payment_link_response = create_payment_link(payment_url_params(payment_intent))
         result.payment_url = JSON.parse(payment_link_response.body)["link_url"]
 
@@ -51,13 +54,11 @@ module Invoices
         result.third_party_failure!(third_party: PROVIDER_NAME, error_code: e.error_code, error_message: e.error_body)
       end
 
-      private
-
       attr_accessor :invoice
 
       delegate :organization, :customer, to: :invoice
 
-      def create_payment(cashfree_payment)
+      def create_payment(cashfree_payment, amount_cents: nil)
         @invoice = Invoice.find_by(id: cashfree_payment.metadata[:lago_invoice_id])
 
         increment_payment_attempts
@@ -68,7 +69,7 @@ module Invoices
           customer:,
           payment_provider_id: cashfree_payment_provider.id,
           payment_provider_customer_id: customer.cashfree_customer.id,
-          amount_cents: @invoice.total_due_amount_cents,
+          amount_cents: amount_cents || @invoice.total_due_amount_cents,
           amount_currency: @invoice.currency,
           provider_payment_id: cashfree_payment.id
         )

@@ -129,10 +129,6 @@ RSpec.describe Plans::CreateService do
   describe "#call" do
     subject(:result) { plans_service.call }
 
-    before do
-      allow(SegmentTrackJob).to receive(:perform_later)
-    end
-
     it "creates a plan" do
       expect { plans_service.call }
         .to change(Plan, :count).by(1)
@@ -141,6 +137,15 @@ RSpec.describe Plans::CreateService do
       expect(SendWebhookJob).to have_been_enqueued.with("plan.created", plan)
       expect(plan.taxes.pluck(:code)).to eq([plan_tax.code])
       expect(plan.invoice_display_name).to eq(plan_invoice_display_name)
+    end
+
+    context "when send_webhook is false" do
+      it "does not enqueue the plan.created webhook but still produces the activity log" do
+        result = described_class.call(create_args, send_webhook: false)
+
+        expect(SendWebhookJob).not_to have_been_enqueued.with("plan.created", result.plan)
+        expect(Utils::ActivityLog).to have_produced("plan.created").after_commit.with(result.plan)
+      end
     end
 
     it "does not create minimum commitment" do
@@ -295,7 +300,7 @@ RSpec.describe Plans::CreateService do
     it "calls SegmentTrackJob" do
       plan = plans_service.call.plan
 
-      expect(SegmentTrackJob).to have_received(:perform_later).with(
+      expect(SegmentTrackJob).to have_been_enqueued.with(
         membership_id: CurrentContext.membership,
         event: "plan_created",
         properties: {
@@ -952,6 +957,21 @@ RSpec.describe Plans::CreateService do
         expect(result).to be_success
         expect(result.plan.metadata).to be_nil
       end
+    end
+  end
+
+  context "when the organization uses the product catalog and sends legacy pricing" do
+    let(:create_args) do
+      {organization_id: organization.id, name: "Catalog plan", code: "catalog_plan", amount_currency: "USD", interval: "monthly"}
+    end
+
+    before { organization.enable_feature_flag!(:product_catalog) }
+
+    it "rejects the legacy field" do
+      result = plans_service.call
+
+      expect(result).to be_failure
+      expect(result.error.messages[:interval]).to eq(["legacy_billing_disabled"])
     end
   end
 end

@@ -10,6 +10,8 @@ RSpec.describe Types::Fees::Object do
 
     expect(subject).to have_field(:add_on).of_type("AddOn")
     expect(subject).to have_field(:charge).of_type("Charge")
+    expect(subject).to have_field(:contract).of_type("Contract")
+    expect(subject).to have_field(:contract_rate_card).of_type("ContractAppliedRateCard")
     expect(subject).to have_field(:currency).of_type("CurrencyEnum!")
     expect(subject).to have_field(:description).of_type("String")
     expect(subject).to have_field(:grouped_by).of_type("JSON!")
@@ -26,10 +28,18 @@ RSpec.describe Types::Fees::Object do
     expect(subject).to have_field(:events_count).of_type("BigInt")
     expect(subject).to have_field(:fee_type).of_type("FeeTypesEnum!")
     expect(subject).to have_field(:offsettable_amount_cents).of_type("BigInt!")
+    expect(subject).to have_field(:pay_in_advance).of_type("Boolean!")
+    expect(subject).to have_field(:precise_amount_cents).of_type("Float!")
+    expect(subject).to have_field(:precise_coupons_amount_cents).of_type("Float!")
+    expect(subject).to have_field(:precise_total_amount_cents).of_type("Float!")
     expect(subject).to have_field(:precise_unit_amount).of_type("Float!")
+    expect(subject).to have_field(:sub_total_excluding_taxes_amount_cents).of_type("BigInt!")
+    expect(subject).to have_field(:sub_total_excluding_taxes_precise_amount_cents).of_type("Float!")
     expect(subject).to have_field(:succeeded_at).of_type("ISO8601DateTime")
     expect(subject).to have_field(:taxes_amount_cents).of_type("BigInt!")
+    expect(subject).to have_field(:taxes_precise_amount_cents).of_type("Float!")
     expect(subject).to have_field(:taxes_rate).of_type("Float")
+    expect(subject).to have_field(:total_amount_cents).of_type("BigInt!")
     expect(subject).to have_field(:units).of_type("Float!")
 
     expect(subject).to have_field(:applied_taxes).of_type("[FeeAppliedTax!]")
@@ -43,6 +53,37 @@ RSpec.describe Types::Fees::Object do
     expect(subject).to have_field(:presentation_breakdowns).of_type("[PresentationBreakdownUsage!]")
     expect(subject).to have_field(:pricing_unit_usage).of_type("PricingUnitUsage")
     expect(subject).to have_field(:properties).of_type("FeeProperties")
+  end
+
+  describe "contract provenance" do
+    let(:organization) { create(:organization, feature_flags: ["product_catalog"]) }
+    let(:customer) { create(:customer, organization:) }
+    let(:invoice) { create(:invoice, organization:, customer:) }
+
+    context "when the fee comes from a contract product" do
+      let(:contract) { create(:contract, organization:, customer:) }
+      let(:contract_rate_card) { create(:contract_rate_card, organization:, contract:) }
+      let(:rate_card_rate) { create(:rate_card_rate, organization:, rate_card: contract_rate_card.rate_card) }
+      let(:fee) do
+        create(:fee, invoice:, subscription: nil, fee_type: :product,
+          invoiceable: contract_rate_card.rate_card.product, contract:, contract_rate_card:, rate_card_rate:)
+      end
+
+      it "resolves the contract and rate card" do
+        expect(run_graphql_field("Fee.contract", fee)).to eq(contract)
+        expect(run_graphql_field("Fee.contractRateCard", fee)).to eq(contract_rate_card)
+      end
+    end
+
+    context "when the fee comes from a legacy subscription" do
+      let(:subscription) { create(:subscription, customer:, organization:) }
+      let(:fee) { create(:fee, invoice:, subscription:, organization:) }
+
+      it "returns nil for contract provenance" do
+        expect(run_graphql_field("Fee.contract", fee)).to be_nil
+        expect(run_graphql_field("Fee.contractRateCard", fee)).to be_nil
+      end
+    end
   end
 
   describe "#wallet_transaction" do
@@ -59,7 +100,7 @@ RSpec.describe Types::Fees::Object do
     end
 
     context "when fee is not a credit" do
-      let(:fee) { create(:charge_fee) }
+      let(:fee) { build(:charge_fee) }
 
       it "returns nil" do
         expect(subject).to be_nil
@@ -71,7 +112,7 @@ RSpec.describe Types::Fees::Object do
     subject { run_graphql_field("Fee.presentationBreakdowns", fee) }
 
     context "when fee has no presentation_breakdowns" do
-      let(:fee) { create(:charge_fee) }
+      let(:fee) { build(:charge_fee) }
 
       it "returns an empty array" do
         expect(subject).to eq([])
@@ -79,9 +120,16 @@ RSpec.describe Types::Fees::Object do
     end
 
     context "when fee has a presentation_breakdown" do
+      let(:charge) do
+        create(:standard_charge, properties: {
+          "amount" => "100",
+          "presentation_group_keys" => [{"value" => "department", "options" => {"display_in_invoice" => true}}]
+        })
+      end
       let(:fee) do
-        create(
+        build(
           :charge_fee,
+          charge:,
           presentation_breakdowns: [build(:presentation_breakdown)]
         )
       end
@@ -97,9 +145,19 @@ RSpec.describe Types::Fees::Object do
     end
 
     context "when fee has a composite presentation_breakdown" do
+      let(:charge) do
+        create(:standard_charge, properties: {
+          "amount" => "100",
+          "presentation_group_keys" => [
+            {"value" => "department", "options" => {"display_in_invoice" => true}},
+            {"value" => "region", "options" => {"display_in_invoice" => true}}
+          ]
+        })
+      end
       let(:fee) do
-        create(
+        build(
           :charge_fee,
+          charge:,
           presentation_breakdowns: [
             build(
               :presentation_breakdown,

@@ -5,33 +5,34 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Gocardless::HandleEventService do
   subject(:event_service) { described_class.new(payment_provider:, event_json:) }
 
+  before_all do
+    create_default(:organization)
+  end
+
   let(:event_json) do
     path = Rails.root.join("spec/fixtures/gocardless/events.json")
     JSON.parse(File.read(path))["events"].first.to_json
   end
 
   let(:payment_service) { instance_double(Invoices::Payments::GocardlessService) }
-  let(:service_result) { BaseService::Result.new }
+  let(:service_result) { Invoices::Payments::GocardlessService::RESULTS.fetch(:update_payment_status).new }
   let(:payment_provider) { create(:gocardless_provider) }
 
   describe "#call" do
     context "when succeeded payment event" do
       it "routes the event to an other service" do
-        allow(Invoices::Payments::GocardlessService).to receive(:new)
-          .and_return(payment_service)
-        allow(payment_service).to receive(:update_payment_status)
+        allow(Invoices::Payments::GocardlessService).to receive(:call)
           .and_return(service_result)
 
         event_service.call
 
-        expect(Invoices::Payments::GocardlessService).to have_received(:new)
-        expect(payment_service).to have_received(:update_payment_status)
+        expect(Invoices::Payments::GocardlessService).to have_received(:call)
+          .with(:update_payment_status, provider_payment_id: "PM0068WBTXDQ0Q", status: "paid_out")
       end
     end
 
     context "when event metadata contains payable_type PaymentRequest" do
-      let(:payment_service) { instance_double(PaymentRequests::Payments::GocardlessService) }
-      let(:service_result) { BaseService::Result.new }
+      let(:service_result) { PaymentRequests::Payments::GocardlessService::RESULTS.fetch(:update_payment_status).new }
 
       let(:event_json) do
         path = Rails.root.join("spec/fixtures/gocardless/events_payment_request.json")
@@ -39,15 +40,13 @@ RSpec.describe PaymentProviders::Gocardless::HandleEventService do
       end
 
       it "routes the event to an other service" do
-        allow(PaymentRequests::Payments::GocardlessService).to receive(:new)
-          .and_return(payment_service)
-        allow(payment_service).to receive(:update_payment_status)
+        allow(PaymentRequests::Payments::GocardlessService).to receive(:call)
           .and_return(service_result)
 
         event_service.call
 
-        expect(PaymentRequests::Payments::GocardlessService).to have_received(:new)
-        expect(payment_service).to have_received(:update_payment_status)
+        expect(PaymentRequests::Payments::GocardlessService).to have_received(:call)
+          .with(:update_payment_status, provider_payment_id: "PM0068WBTXDQ0Q", status: "paid_out")
       end
     end
 

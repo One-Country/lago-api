@@ -5,10 +5,10 @@ require "rails_helper"
 RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
   subject(:service) { described_class.new(subscription:, fixed_charge:, params:) }
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
+  let_it_be(:organization, refind: true) { create(:organization) }
+  let_it_be(:customer, refind: true) { create(:customer, organization:) }
+  let_it_be(:plan, refind: true) { create(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create(:add_on, organization:) }
   let(:subscription) { create(:subscription, customer:, plan:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:) }
   let(:params) do
@@ -32,6 +32,18 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
       before do
         fixed_charge
         subscription
+      end
+
+      context "when subscription is incomplete" do
+        let(:subscription) { create(:subscription, :incomplete, customer:, plan:) }
+
+        it "returns a validation error without applying the change" do
+          result = nil
+          expect { result = service.call }.not_to change(Plan, :count)
+
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+          expect(result.error.messages).to eq({base: ["subscription_incomplete"]})
+        end
       end
 
       it "creates a plan override" do
@@ -72,6 +84,113 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
         expect(result.fixed_charge.units).to eq(10)
       end
 
+      context "when units is negative" do
+        let(:params) { {units: "-1"} }
+
+        it "returns a validation failure" do
+          result = service.call
+
+          expect(result).not_to be_success
+          expect(result.error).to be_a(BaseService::ValidationFailure)
+        end
+      end
+
+      context "when updating units with apply_units_immediately" do
+        let(:params) do
+          {
+            invoice_display_name: "Overridden Fixed Charge",
+            units: "10",
+            apply_units_immediately: true
+          }
+        end
+
+        context "with a pay in advance fixed charge" do
+          let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, pay_in_advance: true) }
+
+          it "schedules a Invoices::CreatePayInAdvanceFixedChargesJob" do
+            expect { service.call }
+              .to change(FixedChargeEvent, :count).by(1)
+              .and have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+              .with(subscription, kind_of(Integer))
+          end
+
+          context "when the subscription is payment-gated" do
+            let(:subscription) { create(:subscription, :incomplete, customer:, plan:) }
+
+            before { create(:subscription_activation_rule, subscription:, organization:, status: :pending) }
+
+            it "does not schedule a Invoices::CreatePayInAdvanceFixedChargesJob" do
+              expect { service.call }.not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+            end
+          end
+        end
+
+        context "with a pay in arrears fixed charge" do
+          it "does not schedule a Invoices::CreatePayInAdvanceFixedChargesJob" do
+            expect { service.call }.not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+          end
+        end
+      end
+
+      context "when apply_units_immediately is false" do
+        let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, pay_in_advance: true) }
+
+        it "does not schedule a Invoices::CreatePayInAdvanceFixedChargesJob" do
+          expect { service.call }.not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+        end
+      end
+
+      context "when units are not updated" do
+        let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, pay_in_advance: true) }
+        let(:params) do
+          {
+            invoice_display_name: "Overridden Fixed Charge",
+            apply_units_immediately: true
+          }
+        end
+
+        it "does not schedule a Invoices::CreatePayInAdvanceFixedChargesJob" do
+          expect { service.call }.not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+        end
+      end
+
+      context "when a plan override is created and the units are unchanged" do
+        let(:fixed_charge) do
+          create(:fixed_charge, plan:, organization:, add_on:, units: 5, pay_in_advance: true)
+        end
+        let(:params) { {invoice_display_name: "Renamed", units: "5", apply_units_immediately: true} }
+
+        before do
+          create(:fixed_charge_event, subscription:, fixed_charge:, units: 5, timestamp: 1.hour.ago)
+        end
+
+        it "still creates the fixed charge override" do
+          expect { service.call }.to change(FixedCharge, :count).by(1)
+        end
+
+        it "does not enqueue the pay-in-advance billing job" do
+          expect { service.call }
+            .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+        end
+
+        it "does not emit a fixed charge event" do
+          expect { service.call }.not_to change(FixedChargeEvent, :count)
+        end
+
+        context "when the subscription already has a plan override" do
+          let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+          let(:subscription) { create(:subscription, customer:, plan: overridden_plan) }
+
+          it "creates the fixed charge override without emitting an event or scheduling billing" do
+            expect { service.call }
+              .to change(FixedCharge, :count).by(1)
+              .and not_change(FixedChargeEvent, :count)
+
+            expect(Invoices::CreatePayInAdvanceFixedChargesJob).not_to have_been_enqueued
+          end
+        end
+      end
+
       context "when subscription is nil" do
         let(:subscription) { nil }
 
@@ -97,7 +216,7 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
       end
 
       context "when subscription already has a plan override" do
-        let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+        let_it_be(:overridden_plan, refind: true) { create(:plan, organization:, parent: plan) }
         let(:subscription) { create(:subscription, customer:, plan: overridden_plan) }
 
         it "does not create a new plan" do
@@ -113,7 +232,7 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
       end
 
       context "when fixed charge override already exists" do
-        let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+        let_it_be(:overridden_plan, refind: true) { create(:plan, organization:, parent: plan) }
         let(:subscription) { create(:subscription, customer:, plan: overridden_plan) }
         let!(:existing_override) { create(:fixed_charge, plan: overridden_plan, organization:, add_on:, parent: fixed_charge, code: fixed_charge.code) }
 
@@ -130,7 +249,9 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
         end
 
         it "calls EmitEventsService" do
-          allow(FixedCharges::EmitEventsService).to receive(:call!)
+          allow(FixedCharges::EmitEventsService).to receive(:call!).and_return(
+              FixedCharges::EmitEventsService::Result.new.tap { |r| r.fixed_charge_events = [] }
+            )
 
           service.call
 
@@ -151,7 +272,9 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
           end
 
           it "calls EmitEventsService with apply_units_immediately true" do
-            allow(FixedCharges::EmitEventsService).to receive(:call!)
+            allow(FixedCharges::EmitEventsService).to receive(:call!).and_return(
+              FixedCharges::EmitEventsService::Result.new.tap { |r| r.fixed_charge_events = [] }
+            )
 
             service.call
 
@@ -165,7 +288,7 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
       end
 
       context "when the fixed charge passed is itself an override" do
-        let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+        let_it_be(:overridden_plan, refind: true) { create(:plan, organization:, parent: plan) }
         let(:subscription) { create(:subscription, customer:, plan: overridden_plan) }
         let(:parent_fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:) }
         let!(:fixed_charge) { create(:fixed_charge, plan: overridden_plan, organization:, add_on:, parent: parent_fixed_charge, code: parent_fixed_charge.code) }
@@ -195,6 +318,171 @@ RSpec.describe Subscriptions::UpdateOrOverrideFixedChargeService do
           result = service.call
 
           expect(result.fixed_charge.taxes).to include(tax)
+        end
+      end
+
+      context "with units-only params" do
+        let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, units: 5) }
+        let(:params) { {units: "15"} }
+
+        it "writes a Subscription::FixedChargeUnitsOverride for the (sub, fc) pair" do
+          expect { service.call }
+            .to change(::Subscription::FixedChargeUnitsOverride, :count).by(1)
+
+          override = ::Subscription::FixedChargeUnitsOverride.find_by(subscription:, fixed_charge:)
+          expect(override.units).to eq(15)
+          expect(override.organization).to eq(subscription.organization)
+        end
+
+        it "does not create a plan override or a fixed_charge override" do
+          expect { service.call }
+            .to not_change(Plan, :count)
+            .and not_change(FixedCharge, :count)
+        end
+
+        it "returns the parent fixed_charge in the result" do
+          result = service.call
+
+          expect(result).to be_success
+          expect(result.fixed_charge).to eq(fixed_charge)
+        end
+
+        it "emits a fixed charge event with the override units" do
+          service.call
+
+          event = FixedChargeEvent.where(subscription:, fixed_charge:).order(:created_at).last
+          expect(event.units).to eq(15)
+        end
+
+        context "when an override already exists" do
+          before do
+            create(:subscription_fixed_charge_units_override, subscription:, fixed_charge:, organization:, units: 7)
+          end
+
+          it "updates the existing override row instead of creating a new one" do
+            expect { service.call }
+              .not_to change(::Subscription::FixedChargeUnitsOverride, :count)
+
+            override = ::Subscription::FixedChargeUnitsOverride.find_by(subscription:, fixed_charge:)
+            expect(override.units).to eq(15)
+          end
+        end
+
+        context "when apply_units_immediately is true on a pay_in_advance fixed_charge" do
+          let(:fixed_charge) do
+            create(:fixed_charge, plan:, organization:, add_on:, units: 5, pay_in_advance: true)
+          end
+          let(:params) { {units: "15", apply_units_immediately: true} }
+
+          it "enqueues the pay-in-advance billing job for the subscription" do
+            expect { service.call }
+              .to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+              .with(subscription, kind_of(Integer))
+          end
+        end
+
+        context "when apply_units_immediately is true but the units are unchanged" do
+          let(:fixed_charge) do
+            create(:fixed_charge, plan:, organization:, add_on:, units: 5, pay_in_advance: true)
+          end
+          let(:params) { {units: "5", apply_units_immediately: true} }
+
+          before do
+            create(:fixed_charge_event, subscription:, fixed_charge:, units: 5, timestamp: 1.hour.ago)
+          end
+
+          it "does not emit a fixed charge event" do
+            expect { service.call }.not_to change(FixedChargeEvent, :count)
+          end
+
+          it "does not enqueue the pay-in-advance billing job" do
+            expect { service.call }
+              .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+          end
+        end
+
+        context "when apply_units_immediately is true and the units match an existing override" do
+          let(:fixed_charge) do
+            create(:fixed_charge, plan:, organization:, add_on:, units: 5, pay_in_advance: true)
+          end
+          let(:params) { {units: "7", apply_units_immediately: true} }
+
+          before do
+            create(:subscription_fixed_charge_units_override, subscription:, fixed_charge:, organization:, units: 7)
+            create(:fixed_charge_event, subscription:, fixed_charge:, units: 7, timestamp: 1.hour.ago)
+          end
+
+          it "does not enqueue the pay-in-advance billing job" do
+            expect { service.call }
+              .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+          end
+        end
+
+        context "when apply_units_immediately is true and the units actually change" do
+          let(:fixed_charge) do
+            create(:fixed_charge, plan:, organization:, add_on:, units: 5, pay_in_advance: true)
+          end
+          let(:params) { {units: "15", apply_units_immediately: true} }
+
+          before do
+            create(:fixed_charge_event, subscription:, fixed_charge:, units: 5, timestamp: 1.hour.ago)
+          end
+
+          it "emits a fixed charge event and enqueues the billing job" do
+            expect { service.call }
+              .to change(FixedChargeEvent, :count).by(1)
+              .and have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+          end
+        end
+
+        context "when apply_units_immediately is true but the fixed_charge is pay_in_arrears" do
+          let(:params) { {units: "15", apply_units_immediately: true} }
+
+          it "does not enqueue the pay-in-advance billing job" do
+            expect { service.call }
+              .not_to have_enqueued_job(Invoices::CreatePayInAdvanceFixedChargesJob)
+          end
+        end
+
+        context "when the subscription is already on an overridden plan" do
+          let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+          let(:subscription) { create(:subscription, customer:, plan: overridden_plan) }
+
+          it "falls through to the legacy plan-override path" do
+            expect { service.call }
+              .to not_change(::Subscription::FixedChargeUnitsOverride, :count)
+              .and change(FixedCharge, :count).by(1)
+          end
+        end
+      end
+
+      context "when the subscription has existing units overrides and params trigger plan override" do
+        let(:other_fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, units: 8) }
+        let(:params) { {units: "15", tax_codes: [create(:tax, organization:).code]} }
+
+        before do
+          other_fixed_charge
+          create(:subscription_fixed_charge_units_override, subscription:, fixed_charge:, organization:, units: 11)
+          create(:subscription_fixed_charge_units_override, subscription:, fixed_charge: other_fixed_charge, organization:, units: 22)
+        end
+
+        it "discards the override rows and promotes their units onto the new fixed_charge overrides" do
+          expect { service.call }
+            .to change(Plan, :count).by(1)
+            .and change(FixedCharge, :count).by(2)
+            .and change { ::Subscription::FixedChargeUnitsOverride.kept.where(subscription:).count }.from(2).to(0)
+
+          subscription.reload
+          overridden_plan = subscription.plan
+          expect(overridden_plan.parent_id).to eq(plan.id)
+
+          # The fixed_charge the user updated reflects the user's units (15) plus its tax_codes
+          fc_being_updated = overridden_plan.fixed_charges.find_sole_by(parent_id: fixed_charge.id)
+          expect(fc_being_updated.units).to eq(15)
+
+          # The other fixed_charge that had an override row now carries those units on its plan-override clone
+          other_fc_overridden = overridden_plan.fixed_charges.find_sole_by(parent_id: other_fixed_charge.id)
+          expect(other_fc_overridden.units).to eq(22)
         end
       end
     end

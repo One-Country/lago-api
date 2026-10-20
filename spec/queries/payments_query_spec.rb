@@ -8,17 +8,18 @@ RSpec.describe PaymentsQuery do
   end
 
   let(:returned_ids) { result.payments.pluck(:id) }
-  let(:pagination) { nil }
-  let(:filters) { nil }
-  let(:search_term) { nil }
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
   let(:invoice) { create(:invoice, organization:) }
   let(:invoice2) { create(:invoice, organization:) }
   let(:payment_request) { create(:payment_request, organization:) }
   let(:payment_one) { create(:payment, payable: invoice) }
   let(:payment_two) { create(:payment, payable: invoice2) }
   let(:payment_three) { create(:payment, payable: payment_request) }
+  let(:pagination) { nil }
+  let(:filters) { nil }
+  let(:search_term) { nil }
+
+  let_it_be(:membership) { create(:membership) }
+  let_it_be(:organization) { create_default(:organization) }
 
   before do
     payment_one
@@ -49,9 +50,9 @@ RSpec.describe PaymentsQuery do
   end
 
   context "with search_term" do
-    let(:customer) { create(:customer, firstname: "first", lastname: "last", external_id: "external_c_id", email: "email@example.com", name: "The name") }
-    let(:invoice) { create(:invoice, :finalized, organization:, customer:, number: "number-test-123") }
-    let(:invoice3) { create(:invoice, :finalized, organization:, customer:) }
+    let_it_be(:customer) { create(:customer, organization:, firstname: "first", lastname: "last", external_id: "external_c_id", email: "email@example.com", name: "The name") }
+    let_it_be(:invoice) { create(:invoice, :finalized, organization:, customer:, number: "number-test-123") }
+    let_it_be(:invoice3) { create(:invoice, :finalized, organization:, customer:) }
     let(:payment_one) { create(:payment, payable: invoice) }
     let(:payment_two) { create(:payment, payable: invoice3) }
     let(:payment_three) { create(:payment, payable: invoice2) }
@@ -71,6 +72,24 @@ RSpec.describe PaymentsQuery do
         expect(result).to be_success
         expect(returned_ids.count).to eq(1)
         expect(returned_ids).to contain_exactly(payment_one.id)
+      end
+    end
+
+    context "when search_term is a partial id" do
+      let(:search_term) { payment_one.id.first(13) }
+
+      it "does not match payments on a partial id" do
+        expect(result).to be_success
+        expect(returned_ids).not_to include(payment_one.id)
+      end
+    end
+
+    context "when search_term is a uuid matching no payment" do
+      let(:search_term) { "00000000-0000-0000-0000-000000000000" }
+
+      it "returns an empty result set" do
+        expect(result).to be_success
+        expect(returned_ids).to be_empty
       end
     end
 
@@ -164,9 +183,11 @@ RSpec.describe PaymentsQuery do
 
   context "when filtering by external_customer_id" do
     let(:filters) { {external_customer_id: customer.external_id} }
-    let(:customer) { create(:customer) }
-    let(:new_invoice) { create(:invoice, organization:, customer:) }
     let(:new_payment) { create(:payment, payable: new_invoice) }
+    let(:customer) { create_default(:customer) }
+    let(:invoice) { create(:invoice, organization:) }
+
+    let(:new_invoice) { create(:invoice, organization:, customer:) }
 
     before do
       new_payment

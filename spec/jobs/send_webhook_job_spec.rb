@@ -3,14 +3,20 @@
 require "rails_helper"
 
 RSpec.describe SendWebhookJob do
+  before_all do
+    create_default(:customer)
+  end
+
   subject(:send_webhook_job) { described_class }
 
-  let(:organization) { create(:organization, webhook_url: "http://foo.bar") }
-  let(:invoice) { create(:invoice, organization:) }
+  let_it_be(:organization) { create_default(:organization, webhook_url: "http://foo.bar") }
+  let_it_be(:invoice) { create(:invoice, organization:) }
+  let(:triggered_alert) { create(:triggered_alert, alert: create(:alert, organization:)) }
 
   describe ".perform_later" do
     context "when no webhook endpoints is present" do
-      let(:organization) { create(:organization, webhook_url: nil) }
+      let_it_be(:organization) { create_default(:organization, webhook_url: nil) }
+      let_it_be(:invoice) { create(:invoice, organization:) }
 
       it "does not enqueue a job" do
         expect do
@@ -51,6 +57,40 @@ RSpec.describe SendWebhookJob do
     end
   end
 
+  describe ".queue_for" do
+    context "when SIDEKIQ_WEBHOOK is not set" do
+      before { ENV.delete("SIDEKIQ_WEBHOOK") }
+
+      it "uses the webhook queue for every webhook type" do
+        expect([described_class.queue_for("alert.triggered"), described_class.queue_for("invoice.created")])
+          .to eq(%i[webhook webhook])
+      end
+    end
+
+    context "when SIDEKIQ_WEBHOOK is true" do
+      before { ENV["SIDEKIQ_WEBHOOK"] = "true" }
+      after { ENV.delete("SIDEKIQ_WEBHOOK") }
+
+      it "uses the high priority queue for alerts" do
+        expect(described_class.queue_for("alert.triggered")).to eq(:webhook_worker_high_priority)
+      end
+
+      it "uses the webhook_worker queue for other webhook types" do
+        expect(described_class.queue_for("invoice.created")).to eq(:webhook_worker)
+      end
+
+      it "enqueues alert webhooks on the high priority queue" do
+        expect { described_class.perform_later("alert.triggered", triggered_alert) }
+          .to have_enqueued_job(described_class).on_queue("webhook_worker_high_priority")
+      end
+
+      it "enqueues other webhooks on the webhook_worker queue" do
+        expect { described_class.perform_later("invoice.created", invoice) }
+          .to have_enqueued_job(described_class).on_queue("webhook_worker")
+      end
+    end
+  end
+
   describe "#perform" do
     shared_examples "a webhook service" do |webhook_type, service_class, object, options|
       let(:webhook_service) { instance_double(service_class) }
@@ -75,14 +115,13 @@ RSpec.describe SendWebhookJob do
 
       before do
         allow(Webhooks::Invoices::CreatedService).to receive(:new)
-        allow(SendHttpWebhookJob).to receive(:perform_later)
       end
 
       it "calls the webhook invoice service" do
         webhook = create(:webhook, webhook_endpoint: create(:webhook_endpoint, organization:))
         send_webhook_job.perform_now("invoice.created", invoice, {}, webhook.id)
 
-        expect(SendHttpWebhookJob).to have_received(:perform_later).with(webhook)
+        expect(SendHttpWebhookJob).to have_been_enqueued.with(webhook)
         expect(Webhooks::Invoices::CreatedService).not_to have_received(:new)
       end
     end
@@ -413,7 +452,7 @@ RSpec.describe SendWebhookJob do
       end
     end
 
-    context "when webhook_type is credit_note.provider_refund_failure" do
+    context "when webhook_type is credit_note.refund_failure" do
       let(:webhook_service) { instance_double(Webhooks::CreditNotes::PaymentProviderRefundFailureService) }
       let(:credit_note) { create(:credit_note) }
 
@@ -435,13 +474,26 @@ RSpec.describe SendWebhookJob do
 
       it "calls the webhook service" do
         described_class.perform_now(
-          "credit_note.provider_refund_failure",
+          "credit_note.refund_failure",
           credit_note,
           webhook_options
         )
 
         expect(Webhooks::CreditNotes::PaymentProviderRefundFailureService).to have_received(:new)
         expect(webhook_service).to have_received(:call)
+      end
+
+      context "when the job was enqueued with the former credit_note.provider_refund_failure name" do
+        it "calls the webhook service" do
+          described_class.perform_now(
+            "credit_note.provider_refund_failure",
+            credit_note,
+            webhook_options
+          )
+
+          expect(Webhooks::CreditNotes::PaymentProviderRefundFailureService).to have_received(:new)
+          expect(webhook_service).to have_received(:call)
+        end
       end
     end
 
@@ -726,6 +778,22 @@ RSpec.describe SendWebhookJob do
       end
     end
 
+    context "with add_on webhooks" do
+      let(:object) { create(:add_on, organization:) }
+
+      it_behaves_like "a webhook service",
+        "add_on.created",
+        Webhooks::AddOns::CreatedService
+
+      it_behaves_like "a webhook service",
+        "add_on.updated",
+        Webhooks::AddOns::UpdatedService
+
+      it_behaves_like "a webhook service",
+        "add_on.deleted",
+        Webhooks::AddOns::DeletedService
+    end
+
     context "with billable metric webhooks" do
       let(:object) { create(:billable_metric, organization:) }
 
@@ -740,6 +808,74 @@ RSpec.describe SendWebhookJob do
       it_behaves_like "a webhook service",
         "billable_metric.deleted",
         Webhooks::BillableMetrics::DeletedService
+    end
+
+    context "with coupon webhooks" do
+      let(:object) { create(:coupon, organization:) }
+
+      it_behaves_like "a webhook service",
+        "coupon.created",
+        Webhooks::Coupons::CreatedService
+
+      it_behaves_like "a webhook service",
+        "coupon.updated",
+        Webhooks::Coupons::UpdatedService
+
+      it_behaves_like "a webhook service",
+        "coupon.deleted",
+        Webhooks::Coupons::DeletedService
+
+      it_behaves_like "a webhook service",
+        "coupon.terminated",
+        Webhooks::Coupons::TerminatedService
+    end
+
+    context "with quote webhooks" do
+      let(:object) { create(:quote_version, organization:) }
+
+      it_behaves_like "a webhook service",
+        "quote.created",
+        Webhooks::Quotes::CreatedService
+
+      it_behaves_like "a webhook service",
+        "quote.approved",
+        Webhooks::Quotes::ApprovedService
+
+      it_behaves_like "a webhook service",
+        "quote.voided",
+        Webhooks::Quotes::VoidedService
+    end
+
+    context "with order form webhooks" do
+      let(:object) { create(:order_form, organization:) }
+
+      it_behaves_like "a webhook service",
+        "order_form.created",
+        Webhooks::OrderForms::CreatedService
+
+      it_behaves_like "a webhook service",
+        "order_form.signed",
+        Webhooks::OrderForms::SignedService
+
+      it_behaves_like "a webhook service",
+        "order_form.expired",
+        Webhooks::OrderForms::ExpiredService
+
+      it_behaves_like "a webhook service",
+        "order_form.voided",
+        Webhooks::OrderForms::VoidedService
+    end
+
+    context "with order webhooks" do
+      let(:object) { create(:order, organization:) }
+
+      it_behaves_like "a webhook service",
+        "order.created",
+        Webhooks::Orders::CreatedService
+
+      it_behaves_like "a webhook service",
+        "order.executed",
+        Webhooks::Orders::ExecutedService
     end
 
     context "when webhook_type is dunning_campaign.finished" do

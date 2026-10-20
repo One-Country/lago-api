@@ -5,10 +5,10 @@ require "rails_helper"
 RSpec.describe CreditNotes::EstimateService, :premium do
   subject(:estimate_service) { described_class.new(invoice: invoice&.reload, items:) }
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
 
-  let(:invoice) do
+  let_it_be(:invoice) do
     create(
       :invoice,
       organization:,
@@ -17,6 +17,7 @@ RSpec.describe CreditNotes::EstimateService, :premium do
       fees_amount_cents: 20,
       coupons_amount_cents: 10,
       taxes_amount_cents: 2,
+      sub_total_including_taxes_amount_cents: 12,
       total_amount_cents: 12,
       payment_status: :succeeded,
       taxes_rate: 20,
@@ -24,6 +25,7 @@ RSpec.describe CreditNotes::EstimateService, :premium do
     )
   end
   let(:tax) { create(:tax, organization:, rate: 20) }
+  let(:invoice_applied_tax) { create(:invoice_applied_tax, tax:, invoice:) }
 
   let(:params) { {invoice_id: invoice&.id, amount_cents: 9, reference: "ref1"} }
 
@@ -52,7 +54,7 @@ RSpec.describe CreditNotes::EstimateService, :premium do
     before do
       create(:fee_applied_tax, tax:, fee: fee1)
       create(:fee_applied_tax, tax:, fee: fee2) if fee2
-      create(:invoice_applied_tax, tax:, invoice:) if invoice
+      invoice_applied_tax if invoice
       Payments::ManualCreateService.call(organization:, params:)
     end
 
@@ -122,6 +124,17 @@ RSpec.describe CreditNotes::EstimateService, :premium do
       end
     end
 
+    context "when a fee tax has no matching invoice tax" do
+      let(:invoice_applied_tax) { nil }
+
+      it "returns the apply taxes failure" do
+        result = estimate_service.call
+
+        expect(result).not_to be_success
+        expect(result.error.code).to eq("invoice_applied_tax_not_found")
+      end
+    end
+
     context "with missing items" do
       let(:items) {}
 
@@ -170,6 +183,7 @@ RSpec.describe CreditNotes::EstimateService, :premium do
           :invoice,
           total_amount_cents: 25000,
           taxes_amount_cents: 5000,
+          sub_total_including_taxes_amount_cents: 25000,
           fees_amount_cents: 20000,
           total_paid_amount_cents: 25000,
           taxes_rate: 25,
@@ -182,7 +196,9 @@ RSpec.describe CreditNotes::EstimateService, :premium do
           :fee,
           invoice:,
           amount_cents: 20000,
-          taxes_rate: 25
+          taxes_rate: 25,
+          taxes_amount_cents: 5000,
+          taxes_precise_amount_cents: 5000
         )
       end
 
@@ -232,8 +248,55 @@ RSpec.describe CreditNotes::EstimateService, :premium do
     end
   end
 
-  context "when invoice is a prepaid credit invoice" do
+  context "when estimating a contract product fee" do
     let(:invoice) do
+      create(:invoice, organization:, customer:, currency: "EUR", fees_amount_cents: 100, status: :finalized,
+        total_amount_cents: 100, total_paid_amount_cents: 100, taxes_amount_cents: 0,
+        payment_status: :succeeded, version_number: 3)
+    end
+    let(:contract) { create(:contract, organization:, customer:) }
+    let(:contract_rate_card) { create(:contract_rate_card, organization:, contract:) }
+    let(:rate_card_rate) { create(:rate_card_rate, organization: contract_rate_card.organization, rate_card: contract_rate_card.rate_card) }
+    let(:fee) do
+      create(:fee, invoice:, subscription: nil, fee_type: :product, amount_cents: 100, precise_amount_cents: 100, taxes_rate: 0,
+        invoiceable: contract_rate_card.rate_card.product, contract:, contract_rate_card:, rate_card_rate:, taxes_amount_cents: 0,
+        taxes_precise_amount_cents: 0)
+    end
+    let(:items) { [{fee_id: fee.id, amount_cents: 40}] }
+
+    it "estimates a partial credit without assuming a subscription" do
+      result = estimate_service.call
+
+      expect(result).to be_success
+      expect(result.credit_note).to have_attributes(invoice:, total_amount_cents: 40)
+      expect(fee.subscription_id).to be_nil
+      expect(result.credit_note.items.sole).to have_attributes(fee:, amount_cents: 40)
+      expect(invoice.reload).to have_attributes(status: "finalized", total_amount_cents: 100)
+    end
+
+    context "when the fee belongs to another organization" do
+      let(:other_organization) { create(:organization) }
+      let(:other_customer) { create(:customer, organization: other_organization) }
+      let(:other_invoice) { create(:invoice, organization: other_organization, customer: other_customer, version_number: 3) }
+      let(:contract) { create(:contract, organization: other_organization, customer: other_customer) }
+      let(:contract_rate_card) { create(:contract_rate_card, organization: other_organization, contract:) }
+      let(:fee) do
+        create(:fee, invoice: other_invoice, subscription: nil, fee_type: :product, amount_cents: 100, precise_amount_cents: 100,
+          invoiceable: contract_rate_card.rate_card.product, contract:, contract_rate_card:, rate_card_rate:, taxes_amount_cents: 0,
+          taxes_precise_amount_cents: 0)
+      end
+
+      it "rejects the foreign fee" do
+        result = estimate_service.call
+
+        expect(result).not_to be_success
+        expect(result.error).to be_a(BaseService::NotFoundFailure)
+      end
+    end
+  end
+
+  context "when invoice is a prepaid credit invoice" do
+    let_it_be(:invoice) do
       create(
         :invoice,
         invoice_type: :credit,

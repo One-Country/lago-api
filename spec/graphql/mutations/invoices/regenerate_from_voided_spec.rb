@@ -4,10 +4,6 @@ require "rails_helper"
 
 RSpec.describe Mutations::Invoices::RegenerateFromVoided do
   let(:required_permission) { "invoices:update" }
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:customer) { create(:customer, organization:) }
-
   let(:voided_invoice) do
     create(
       :invoice,
@@ -19,7 +15,6 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       currency: "EUR"
     )
   end
-
   let(:subscription) do
     create(
       :subscription,
@@ -29,10 +24,8 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       created_at: started_at
     )
   end
-
   let(:timestamp) { Time.zone.now - 1.year }
   let(:started_at) { Time.zone.now - 2.years }
-  let(:plan) { create(:plan, organization:, interval: "monthly") }
   let(:fee_subscription) do
     create(
       :fee,
@@ -42,13 +35,13 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       amount_cents: 2_000
     )
   end
-
   let(:mutation) do
     <<~GQL
       mutation($input: RegenerateInvoiceInput!) {
         regenerateFromVoided(input: $input) {
           id
           voidedInvoiceId
+          purchaseOrderNumber
           fees {
             id
             invoiceDisplayName
@@ -60,7 +53,6 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       }
     GQL
   end
-
   let(:fee_input) do
     {
       id: fee_subscription.id,
@@ -71,6 +63,13 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       unitAmountCents: 5000
     }
   end
+
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:user) { create_default(:user) }
+  let_it_be(:membership) { create_default(:membership) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
+
+  let_it_be(:plan) { create_default(:plan, organization:, interval: "monthly") }
 
   it_behaves_like "requires current user"
   it_behaves_like "requires current organization"
@@ -99,6 +98,53 @@ RSpec.describe Mutations::Invoices::RegenerateFromVoided do
       expect(result_data["fees"].first["units"]).to eq(fee_input[:units])
       expect(result_data["fees"].first["preciseUnitAmount"]).to eq(fee_input[:unitAmountCents])
       expect(result_data["status"]).to eq("finalized")
+    end
+  end
+
+  context "when a purchaseOrderNumber is provided" do
+    it "stores the normalized value on the regenerated invoice" do
+      freeze_time do
+        result = execute_graphql(
+          current_user: membership.user,
+          current_organization: organization,
+          permissions: required_permission,
+          query: mutation,
+          variables: {
+            input: {
+              voidedInvoiceId: voided_invoice.id,
+              fees: [fee_input],
+              purchaseOrderNumber: "  PO-EDITED  "
+            }
+          }
+        )
+
+        result_data = result.dig("data", "regenerateFromVoided")
+        expect(result_data["purchaseOrderNumber"]).to eq("PO-EDITED")
+      end
+    end
+  end
+
+  context "when purchaseOrderNumber is not provided" do
+    before { voided_invoice.update!(purchase_order_number: "PO-INHERIT") }
+
+    it "inherits the purchase order number from the voided invoice" do
+      freeze_time do
+        result = execute_graphql(
+          current_user: membership.user,
+          current_organization: organization,
+          permissions: required_permission,
+          query: mutation,
+          variables: {
+            input: {
+              voidedInvoiceId: voided_invoice.id,
+              fees: [fee_input]
+            }
+          }
+        )
+
+        result_data = result.dig("data", "regenerateFromVoided")
+        expect(result_data["purchaseOrderNumber"]).to eq("PO-INHERIT")
+      end
     end
   end
 end

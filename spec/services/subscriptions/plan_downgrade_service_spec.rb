@@ -16,14 +16,14 @@ RSpec.describe Subscriptions::PlanDowngradeService do
       external_id: SecureRandom.uuid
     )
   end
-
-  let(:old_plan) { create(:plan, amount_cents: 100, organization:, amount_currency: currency) }
-  let(:customer) { create(:customer, :with_hubspot_integration, organization:, currency:) }
-  let(:organization) { create(:organization) }
-  let(:currency) { "EUR" }
-  let(:plan) { create(:plan, amount_cents: 50, organization:) }
   let(:params) { {name: subscription_name} }
   let(:subscription_name) { "new invoice display name" }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:customer, refind: true) { create(:customer, :with_hubspot_integration, organization:, currency:) }
+  let_it_be(:currency, refind: true) { "EUR" }
+  let_it_be(:old_plan, refind: true) { create(:plan, amount_cents: 100, organization:, amount_currency: currency) }
+  let_it_be(:plan, refind: true) { create(:plan, amount_cents: 50, organization:) }
 
   describe "#call" do
     it "creates a new pending next subscription" do
@@ -132,6 +132,42 @@ RSpec.describe Subscriptions::PlanDowngradeService do
       end
     end
 
+    context "when the current subscription has a purchase_order_number" do
+      let(:subscription) do
+        create(
+          :subscription,
+          customer:,
+          plan: old_plan,
+          subscription_at: Time.current,
+          external_id: SecureRandom.uuid,
+          purchase_order_number: "PO-OLD"
+        )
+      end
+
+      it "inherits the purchase_order_number when params omit it" do
+        expect(result).to be_success
+        expect(result.subscription.next_subscription.purchase_order_number).to eq("PO-OLD")
+      end
+
+      context "when params provide a purchase_order_number" do
+        let(:params) { {name: subscription_name, purchase_order_number: "PO-NEW"} }
+
+        it "sets it on the new subscription" do
+          expect(result).to be_success
+          expect(result.subscription.next_subscription.purchase_order_number).to eq("PO-NEW")
+        end
+      end
+
+      context "when params provide an explicit nil purchase_order_number" do
+        let(:params) { {name: subscription_name, purchase_order_number: nil} }
+
+        it "clears it on the new subscription" do
+          expect(result).to be_success
+          expect(result.subscription.next_subscription.purchase_order_number).to be_nil
+        end
+      end
+    end
+
     context "with plan overrides", :premium do
       let(:params) do
         {
@@ -146,6 +182,25 @@ RSpec.describe Subscriptions::PlanDowngradeService do
         next_subscription = result.subscription.next_subscription
         expect(next_subscription.plan.amount_cents).to eq(25)
         expect(next_subscription.plan.parent_id).to eq(plan.id)
+      end
+    end
+
+    context "with activation_rules in params" do
+      let(:params) do
+        {
+          name: subscription_name,
+          activation_rules: [{type: "payment", timeout_hours: 48}]
+        }
+      end
+
+      it "applies the activation rules to the new pending next subscription" do
+        expect(result).to be_success
+
+        next_subscription = result.subscription.next_subscription
+        rules = next_subscription.activation_rules
+        expect(rules.count).to eq(1)
+        expect(rules.first).to be_inactive
+        expect(rules.first.timeout_hours).to eq(48)
       end
     end
 
@@ -184,6 +239,49 @@ RSpec.describe Subscriptions::PlanDowngradeService do
         it "does not enqueue the Hubspot update job" do
           result
           expect(Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob).not_to have_been_enqueued
+        end
+      end
+
+      context "with activation_rules in params" do
+        let(:params) do
+          {
+            name: subscription_name,
+            activation_rules: [{type: "payment", timeout_hours: 48}]
+          }
+        end
+
+        it "applies the activation rules to the current pending subscription" do
+          expect(result).to be_success
+
+          rules = subscription.reload.activation_rules
+          expect(rules.count).to eq(1)
+          expect(rules.first).to be_inactive
+          expect(rules.first.timeout_hours).to eq(48)
+        end
+
+        it "updates the pending subscription's plan and name" do
+          expect(result).to be_success
+          expect(result.subscription.id).to eq(subscription.id)
+          expect(result.subscription.plan_id).to eq(plan.id)
+          expect(result.subscription.name).to eq(subscription_name)
+        end
+      end
+
+      context "with an empty activation_rules array in params" do
+        let(:existing_rule) { create(:subscription_activation_rule, subscription:, organization:) }
+        let(:params) do
+          {
+            name: subscription_name,
+            activation_rules: []
+          }
+        end
+
+        before { existing_rule }
+
+        it "removes the activation rules from the current subscription" do
+          expect { result }
+            .to change { subscription.reload.activation_rules.count }
+            .from(1).to(0)
         end
       end
     end

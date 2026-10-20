@@ -8,12 +8,7 @@ RSpec.describe FixedCharges::EmitEventsService do
   end
 
   let(:subscription) { nil }
-
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:, interval: :yearly, bill_fixed_charges_monthly: true) }
-  let(:add_on) { create(:add_on, organization:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, add_on:) }
-
   let(:customer_1) { create(:customer, organization:) }
   let(:customer_2) { create(:customer, organization:) }
   let(:active_subscription_1) do
@@ -27,7 +22,6 @@ RSpec.describe FixedCharges::EmitEventsService do
       subscription_at: 2.days.ago
     )
   end
-
   let(:active_subscription_2) {
     create(
       :subscription,
@@ -40,6 +34,10 @@ RSpec.describe FixedCharges::EmitEventsService do
     )
   }
   let(:terminated_subscription) { create(:subscription, :terminated, plan:, customer: customer_1) }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:plan, refind: true) { create(:plan, organization:, interval: :yearly, bill_fixed_charges_monthly: true) }
+  let_it_be(:add_on, refind: true) { create(:add_on, organization:) }
 
   describe "#call" do
     subject(:result) { service.call }
@@ -76,6 +74,31 @@ RSpec.describe FixedCharges::EmitEventsService do
       result
 
       expect(FixedChargeEvent.where(subscription: terminated_subscription, fixed_charge:)).not_to exist
+    end
+
+    context "when plan subscriptions already have matching events" do
+      before do
+        [active_subscription_1, active_subscription_2].each do |subscription|
+          create(:fixed_charge_event, subscription:, fixed_charge:, units: fixed_charge.units,
+            timestamp: 1.hour.ago)
+        end
+      end
+
+      it "keeps emitting events without querying previous units" do
+        queries = []
+        counter = lambda do |*, payload|
+          if payload[:sql].match?(/\ASELECT .*FROM "fixed_charge_events"/m)
+            queries << payload[:sql]
+          end
+        end
+
+        ActiveSupport::Notifications.subscribed(counter, "sql.active_record") { result }
+
+        expect(result).to be_success
+        expect(result.fixed_charge_events.map(&:subscription_id))
+          .to match_array([active_subscription_1.id, active_subscription_2.id])
+        expect(queries).to eq([])
+      end
     end
 
     context "when there are incomplete subscriptions" do
@@ -154,12 +177,27 @@ RSpec.describe FixedCharges::EmitEventsService do
 
         expect(FixedChargeEvent.where(subscription: other_subscription, fixed_charge:)).not_to exist
       end
+
+      context "when units match the previous event" do
+        before do
+          create(:fixed_charge_event, subscription:, fixed_charge:, units: fixed_charge.units, timestamp: 1.hour.ago)
+        end
+
+        it "does not emit an event" do
+          expect { result }.not_to change(FixedChargeEvent, :count)
+
+          expect(result).to be_success
+          expect(result.fixed_charge_events).to eq([])
+        end
+      end
     end
 
     context "when apply_units_immediately is true" do
       subject(:service) do
         described_class.new(fixed_charge:, subscription:, apply_units_immediately: true)
       end
+
+      before { freeze_time }
 
       it "creates fixed charge events for all active subscriptions with timestamp current Time" do
         expect { result }.to change(FixedChargeEvent, :count).by(2)
@@ -170,12 +208,12 @@ RSpec.describe FixedCharges::EmitEventsService do
         expect(event_1).to be_present
         expect(event_1.organization).to eq(active_subscription_1.organization)
         expect(event_1.units).to eq(fixed_charge.units)
-        expect(event_1.timestamp).to be_within(1.second).of(Time.current)
+        expect(event_1.timestamp).to eq(Time.current)
 
         expect(event_2).to be_present
         expect(event_2.organization).to eq(active_subscription_2.organization)
         expect(event_2.units).to eq(fixed_charge.units)
-        expect(event_2.timestamp).to be_within(1.second).of(Time.current)
+        expect(event_2.timestamp).to eq(Time.current)
       end
 
       context "when passing timestamp as datetime object" do
@@ -236,6 +274,122 @@ RSpec.describe FixedCharges::EmitEventsService do
           expect(event_2.units).to eq(fixed_charge.units)
           expect(event_2.timestamp).to eq(Time.zone.at(timestamp))
         end
+      end
+
+      context "when there are incomplete subscriptions" do
+        let(:incomplete_subscription) do
+          create(
+            :subscription,
+            :incomplete,
+            :anniversary,
+            plan:,
+            customer: customer_1,
+            started_at: 1.day.ago,
+            subscription_at: 1.day.ago
+          )
+        end
+
+        before { incomplete_subscription }
+
+        it "defers the incomplete subscription event to the next billing period" do
+          expect { result }.to change(FixedChargeEvent, :count).by(3)
+
+          active_event = FixedChargeEvent.find_by(subscription: active_subscription_1, fixed_charge:)
+          incomplete_event = FixedChargeEvent.find_by(subscription: incomplete_subscription, fixed_charge:)
+
+          expect(active_event.timestamp).to eq(Time.current)
+          expect(incomplete_event.timestamp)
+            .to be_within(1.second).of(incomplete_subscription.started_at.beginning_of_day + 1.month)
+        end
+      end
+
+      context "when a provided subscription is incomplete" do
+        let(:subscription) do
+          create(:subscription, :incomplete, :anniversary, plan:, started_at: 1.day.ago, subscription_at: 1.day.ago)
+        end
+
+        it "defers the event to the next billing period" do
+          expect { result }.to change(FixedChargeEvent, :count).by(1)
+
+          event = result.fixed_charge_events.sole
+          expect(event.subscription_id).to eq(subscription.id)
+          expect(event.timestamp).to be_within(1.second).of(subscription.started_at.beginning_of_day + 1.month)
+        end
+      end
+    end
+
+    context "when the subscription cycle does not bill fixed charges this period" do
+      # Yearly plan billing charges monthly but fixed charges per period: outside the first
+      # month of the yearly period fixed_charges_to_datetime is nil, which used to crash the
+      # deferred (apply_units_immediately: false) path with `nil + 1.second`.
+      let(:plan) do
+        create(:plan, organization:, interval: :yearly, bill_charges_monthly: true, bill_fixed_charges_monthly: false)
+      end
+      let(:subscription) do
+        create(
+          :subscription,
+          :active,
+          :calendar,
+          plan:,
+          customer: customer_1,
+          subscription_at: Time.zone.parse("2023-01-01"),
+          started_at: Time.zone.parse("2023-01-01")
+        )
+      end
+
+      around { |example| travel_to(Time.zone.parse("2024-06-15")) { example.run } }
+
+      it "schedules the event at the first second of the next fixed-charges period" do
+        expect { result }.to change(FixedChargeEvent, :count).by(1)
+
+        event = result.fixed_charge_events.first
+        expect(event.subscription_id).to eq(subscription.id)
+        expect(event.timestamp).to be_within(1.second).of(Time.zone.parse("2025-01-01 00:00:00 UTC"))
+      end
+    end
+
+    context "when an active plan subscription has a per-subscription units override" do
+      before do
+        create(:subscription_fixed_charge_units_override,
+          subscription: active_subscription_1,
+          fixed_charge:,
+          organization:)
+      end
+
+      it "skips the overridden subscription when iterating plan subscriptions" do
+        expect { result }.to change(FixedChargeEvent, :count).by(1)
+
+        expect(result.fixed_charge_events.map(&:subscription_id)).to contain_exactly(active_subscription_2.id)
+        expect(FixedChargeEvent.where(subscription: active_subscription_1, fixed_charge:)).not_to exist
+      end
+    end
+
+    context "when an incomplete plan subscription has a per-subscription units override" do
+      let(:incomplete_subscription) do
+        create(
+          :subscription,
+          :incomplete,
+          :anniversary,
+          plan:,
+          customer: customer_1,
+          started_at: 1.day.ago,
+          subscription_at: 1.day.ago
+        )
+      end
+
+      before do
+        create(:subscription_fixed_charge_units_override,
+          subscription: incomplete_subscription,
+          fixed_charge:,
+          organization:)
+      end
+
+      it "skips the overridden incomplete subscription while still emitting for the other active subscriptions" do
+        expect { result }.to change(FixedChargeEvent, :count).by(2)
+
+        expect(result.fixed_charge_events.map(&:subscription_id))
+          .to contain_exactly(active_subscription_1.id, active_subscription_2.id)
+        expect(FixedChargeEvent.where(subscription: incomplete_subscription, fixed_charge:)).not_to exist
       end
     end
   end

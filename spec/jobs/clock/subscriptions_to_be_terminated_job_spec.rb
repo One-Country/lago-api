@@ -5,9 +5,13 @@ require "rails_helper"
 describe Clock::SubscriptionsToBeTerminatedJob, job: true do
   subject { described_class }
 
+  it_behaves_like "a unique job" do
+    let(:job_args) { [] }
+  end
+
   describe ".perform" do
-    let(:organization) { create(:organization) }
-    let(:customer) { create(:customer, organization:) }
+    let_it_be(:organization) { create(:organization) }
+    let_it_be(:customer) { create(:customer, organization:) }
     let!(:webhook_endpoint) { create(:webhook_endpoint, organization:) }
     let(:current_date) { DateTime.parse("2026-06-01") }
     let(:ending_at_15_days) { (current_date + 15.days).beginning_of_day }

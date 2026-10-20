@@ -3,11 +3,19 @@
 require "rails_helper"
 
 describe Clock::RetryFailedInvoicesJob, job: true do
+  before_all do
+    create_default(:organization)
+  end
+
   subject { described_class }
 
+  it_behaves_like "a unique job" do
+    let(:job_args) { [] }
+  end
+
   describe ".perform" do
-    let(:customer) { create(:customer) }
-    let(:failed_invoice) do
+    let_it_be(:customer) { create(:customer) }
+    let_it_be(:failed_invoice) do
       create(
         :invoice,
         status: :failed,
@@ -28,7 +36,8 @@ describe Clock::RetryFailedInvoicesJob, job: true do
         }
       )
     end
-    let(:finalized_invoice) do
+
+    let_it_be(:finalized_invoice) do
       create(
         :invoice,
         status: :finalized,

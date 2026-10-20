@@ -5,14 +5,11 @@ require "rails_helper"
 RSpec.describe CreditNotes::Refunds::GocardlessService do
   subject(:gocardless_service) { described_class.new(credit_note) }
 
-  let(:customer) { create(:customer, payment_provider_code: code) }
-  let(:invoice) { create(:invoice, organization:, customer:) }
-  let(:organization) { customer.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:code) { "gocardless_1" }
+  let_it_be(:customer) { create(:customer, payment_provider_code: code) }
+  let_it_be(:invoice) { create(:invoice, organization:, customer:) }
   let(:gocardless_payment_provider) { create(:gocardless_provider, organization:, code:) }
-  let(:gocardless_customer) { create(:gocardless_customer, customer:) }
-  let(:gocardless_client) { instance_double(GoCardlessPro::Client) }
-  let(:gocardless_refunds_service) { instance_double(GoCardlessPro::Services::RefundsService) }
-  let(:code) { "gocardless_1" }
   let(:payment) do
     create(
       :payment,
@@ -20,10 +17,10 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
       payment_provider_customer: gocardless_customer,
       amount_cents: 200,
       amount_currency: "CHF",
+      payable_payment_status: "succeeded",
       payable: credit_note.invoice
     )
   end
-
   let(:credit_note) do
     create(
       :credit_note,
@@ -34,6 +31,9 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
       refund_status: :pending
     )
   end
+  let(:gocardless_customer) { create(:gocardless_customer, customer:) }
+  let(:gocardless_client) { instance_double(GoCardlessPro::Client) }
+  let(:gocardless_refunds_service) { instance_double(GoCardlessPro::Services::RefundsService) }
 
   describe "#create" do
     before do
@@ -50,7 +50,6 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
           "currency" => "chf",
           "status" => "paid"
         ))
-      allow(SegmentTrackJob).to receive(:perform_later)
     end
 
     it "creates a gocardless refund" do
@@ -61,6 +60,8 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
       expect(result.refund.id).to be_present
 
       expect(result.refund.credit_note).to eq(credit_note)
+      expect(result.refund.refundable).to eq(credit_note)
+      expect(result.refund.reason).to eq("credit_note")
       expect(result.refund.payment).to eq(payment)
       expect(result.refund.payment_provider).to eq(gocardless_payment_provider)
       expect(result.refund.payment_provider_customer).to eq(gocardless_customer)
@@ -75,7 +76,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
     it "call SegmentTrackJob" do
       gocardless_service.create
 
-      expect(SegmentTrackJob).to have_received(:perform_later).with(
+      expect(SegmentTrackJob).to have_been_enqueued.with(
         membership_id: CurrentContext.membership,
         event: "refund_status_changed",
         properties: {
@@ -84,6 +85,30 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
           refund_status: "paid"
         }
       )
+    end
+
+    context "with a payment request for an invoice" do
+      let(:payment_request) { create(:payment_request, :succeeded, customer:, invoices: [invoice]) }
+      let(:payment) do
+        create(
+          :payment,
+          payment_provider: gocardless_payment_provider,
+          payment_provider_customer: gocardless_customer,
+          amount_cents: 200,
+          amount_currency: "CHF",
+          payable_payment_status: "succeeded",
+          payable: payment_request
+        )
+      end
+
+      it "refunds the payment request payment" do
+        result = gocardless_service.create
+
+        expect(result).to be_success
+        expect(result.refund.payment).to eq(payment)
+        expect(gocardless_refunds_service).to have_received(:create)
+          .with(hash_including(params: hash_including(links: {payment: payment.provider_payment_id})))
+      end
     end
 
     context "with an error on gocardless" do
@@ -98,7 +123,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
 
         expect(SendWebhookJob).to have_been_enqueued
           .with(
-            "credit_note.provider_refund_failure",
+            "credit_note.refund_failure",
             credit_note,
             provider_customer_id: gocardless_customer.provider_customer_id,
             provider_error: {
@@ -112,7 +137,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
         expect { gocardless_service.create }
           .to raise_error(GoCardlessPro::Error)
 
-        expect(Utils::ActivityLog).to have_produced("credit_note.refund_failure").with(credit_note)
+        expect(Utils::ActivityLog).to have_produced("credit_note.provider_refund_failure").with(credit_note)
       end
     end
 
@@ -127,7 +152,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
 
         expect(SendWebhookJob).to have_been_enqueued
           .with(
-            "credit_note.provider_refund_failure",
+            "credit_note.refund_failure",
             credit_note,
             provider_customer_id: gocardless_customer.provider_customer_id,
             provider_error: {
@@ -212,6 +237,23 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
         expect(result.credit_note).to be_succeeded
       end
     end
+
+    context "when the provider was disconnected and reconnected" do
+      let(:reconnected_provider) { create(:gocardless_provider, organization:, code: "gocardless_reconnected") }
+      let(:reconnected_customer) { create(:gocardless_customer, customer:, payment_provider: reconnected_provider) }
+
+      before do
+        gocardless_customer.discard!
+        reconnected_customer
+      end
+
+      it "attaches the refund to the provider customer that holds the payment" do
+        result = gocardless_service.create
+
+        expect(result).to be_success
+        expect(result.refund.payment_provider_customer_id).to eq(gocardless_customer.id)
+      end
+    end
   end
 
   describe "#update_status" do
@@ -240,14 +282,12 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
     end
 
     it "calls SegmentTrackJob" do
-      allow(SegmentTrackJob).to receive(:perform_later)
-
       gocardless_service.update_status(
         provider_refund_id: refund.provider_refund_id,
         status: "paid"
       )
 
-      expect(SegmentTrackJob).to have_received(:perform_later).with(
+      expect(SegmentTrackJob).to have_been_enqueued.with(
         membership_id: CurrentContext.membership,
         event: "refund_status_changed",
         properties: {
@@ -303,7 +343,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
 
         expect(SendWebhookJob).to have_been_enqueued
           .with(
-            "credit_note.provider_refund_failure",
+            "credit_note.refund_failure",
             credit_note,
             provider_customer_id: gocardless_customer.provider_customer_id,
             provider_error: {
@@ -319,7 +359,7 @@ RSpec.describe CreditNotes::Refunds::GocardlessService do
           status: "failed"
         )
 
-        expect(Utils::ActivityLog).to have_produced("credit_note.refund_failure").with(credit_note)
+        expect(Utils::ActivityLog).to have_produced("credit_note.provider_refund_failure").with(credit_note)
       end
     end
   end

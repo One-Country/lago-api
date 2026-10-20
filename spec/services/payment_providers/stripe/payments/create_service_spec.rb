@@ -6,8 +6,6 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
   subject(:create_service) { described_class.new(payment:, reference:, metadata:) }
 
   let(:customer) { create(:customer, payment_provider_code: code, country:) }
-  let(:country) { "CA" }
-  let(:organization) { customer.organization }
   let(:stripe_payment_provider) { create(:stripe_provider, organization:, code:) }
   let(:stripe_customer) { create(:stripe_customer, customer:, payment_method_id: "pm_123456", payment_provider: stripe_payment_provider) }
   let(:code) { "stripe_1" }
@@ -26,7 +24,6 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
       lago_billing_entity_id: payment.payable.billing_entity.id
     }
   end
-
   let(:invoice) do
     create(
       :invoice,
@@ -37,7 +34,7 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
       ready_for_payment_processing: true
     )
   end
-
+  let(:payment_method) { create(:payment_method, customer:, provider_method_id: "pm_123456") }
   let(:payment) do
     create(
       :payment,
@@ -45,15 +42,19 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
       status: "pending",
       payment_provider: stripe_payment_provider,
       payment_provider_customer: stripe_customer,
+      payment_method:,
       amount_cents: invoice.total_amount_cents,
       amount_currency: invoice.currency,
       provider_payment_id: nil
     )
   end
+  let(:country) { "CA" }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
 
   describe ".call" do
     let(:provider_customer_service_result) do
-      BaseService::Result.new.tap do |result|
+      PaymentProviderCustomers::Stripe::CheckPaymentMethodService::Result.new.tap do |result|
         result.payment_method = Stripe::PaymentMethod.new(id: "pm_123456")
       end
     end
@@ -81,9 +82,6 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
       stub_request(:post, "https://api.stripe.com/v1/payment_intents")
         .to_return(body: stripe_payment_intent_data.to_json)
 
-      allow(SegmentTrackJob).to receive(:perform_later)
-      allow(Invoices::PrepaidCreditJob).to receive(:perform_later)
-
       allow(PaymentProviderCustomers::Stripe::CheckPaymentMethodService).to receive(:call)
         .and_return(provider_customer_service_result)
 
@@ -108,34 +106,31 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
       expect(Stripe::PaymentIntent).to have_received(:create)
     end
 
-    context "when multiple payment methods are enabled" do
-      let(:default_payment_method) { create(:payment_method, customer:, provider_method_id: "pm_123456") }
+    context "when consent collection is enabled on the provider" do
+      let(:stripe_payment_provider) { create(:stripe_provider, organization:, code:, require_terms_of_service_consent: true) }
 
-      before do
-        payment.update!(payment_method: default_payment_method)
-        organization.update!(feature_flags: ["multiple_payment_methods"])
+      it "does not add consent collection to the payment intent" do
+        create_service.call
+
+        expect(Stripe::PaymentIntent).to have_received(:create).with(
+          hash_excluding(:consent_collection),
+          anything
+        )
       end
+    end
 
-      it "creates a stripe payment and a payment" do
-        result = create_service.call
+    context "when the invoice has already been paid" do
+      before { invoice.update!(payment_status: :succeeded) }
 
-        expect(result).to be_success
-
-        expect(result.payment.id).to be_present
-        expect(result.payment.payable).to eq(invoice)
-        expect(result.payment.payment_provider).to eq(stripe_payment_provider)
-        expect(result.payment.payment_provider_customer).to eq(stripe_customer)
-        expect(result.payment.amount_cents).to eq(invoice.total_amount_cents)
-        expect(result.payment.amount_currency).to eq(invoice.currency)
-        expect(result.payment.status).to eq("succeeded")
-        expect(result.payment.payable_payment_status).to eq("succeeded")
-
-        expect(Stripe::PaymentIntent).to have_received(:create)
+      it "raises AlreadyPaidError and does not create a payment intent" do
+        expect { create_service.call }.to raise_error(Invoices::Payments::AlreadyPaidError)
+        expect(Stripe::PaymentIntent).not_to have_received(:create)
       end
     end
 
     context "when customer does not have a payment method" do
       let(:stripe_customer) { create(:stripe_customer, customer:, payment_provider: stripe_payment_provider) }
+      let(:payment_method) { nil }
 
       before do
         allow(Stripe::Customer).to receive(:retrieve)
@@ -160,12 +155,102 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
         result = create_service.call
 
         expect(result).to be_success
-        expect(customer.stripe_customer.reload).to be_present
-        expect(customer.stripe_customer.provider_customer_id).to eq(stripe_customer.provider_customer_id)
-        expect(customer.stripe_customer.payment_method_id).to eq("pm_123456")
 
         expect(Stripe::Customer).to have_received(:list_payment_methods).with(stripe_customer.provider_customer_id, {}, anything)
         expect(Stripe::PaymentIntent).to have_received(:create)
+          .with(hash_including(payment_method: "pm_123456"), anything)
+      end
+    end
+
+    context "when customer has a default shared payment token" do
+      let(:stripe_customer) { create(:stripe_customer, customer:, payment_provider: stripe_payment_provider) }
+      let(:shared_payment_token) { "spt_test_123" }
+      let(:payment_method) { nil }
+
+      before do
+        organization.enable_feature_flag!("stripe_shared_payment_token")
+
+        allow(Stripe::Customer).to receive(:retrieve)
+          .and_return(Stripe::StripeObject.construct_from(
+            {
+              invoice_settings: {
+                default_payment_method: nil,
+                default_shared_payment_token: shared_payment_token
+              },
+              default_source: nil
+            }
+          ))
+
+        allow(Stripe::Customer).to receive(:list_payment_methods).and_call_original
+        stub_request(:get, %r{/v1/customers/#{stripe_customer.provider_customer_id}/payment_methods}).and_return(
+          status: 200, body: payment_methods_response
+        )
+      end
+
+      context "when no other payment method is attached" do
+        let(:payment_methods_response) do
+          get_stripe_fixtures("customer_list_payment_methods_response.json") do |h|
+            h[:data] = []
+          end
+        end
+
+        it "uses the shared payment token in the payment intent payload" do
+          WebMock.stub_request(:post, "https://api.stripe.com/v1/payment_intents")
+            .with(body: ->(request) {
+              params = Rack::Utils.parse_nested_query(request)
+              expect(params.dig("payment_method_data", "shared_payment_granted_token")).to eq(shared_payment_token)
+              expect(params).not_to have_key("payment_method")
+              expect(params).not_to have_key("return_url")
+              expect(params).not_to have_key("off_session")
+              expect(params["error_on_requires_action"]).to eq("true")
+            })
+            .to_return(body: stripe_payment_intent_data.to_json)
+
+          result = create_service.call
+
+          expect(result).to be_success
+          expect(Stripe::Customer).to have_received(:list_payment_methods).once
+        end
+
+        context "when the stripe_shared_payment_token feature flag is disabled" do
+          before { organization.disable_feature_flag!("stripe_shared_payment_token") }
+
+          it "ignores the shared payment token even when no other payment method is attached" do
+            WebMock.stub_request(:post, "https://api.stripe.com/v1/payment_intents")
+              .with(body: ->(request) {
+                params = Rack::Utils.parse_nested_query(request)
+                expect(params).not_to have_key("payment_method_data")
+              })
+              .to_return(body: stripe_payment_intent_data.to_json)
+
+            result = create_service.call
+
+            expect(result).to be_success
+          end
+        end
+      end
+
+      context "when another payment method is attached" do
+        let(:payment_methods_response) do
+          get_stripe_fixtures("customer_list_payment_methods_response.json") do |h|
+            h[:data][0][:id] = "pm_existing"
+          end
+        end
+
+        it "ignores the shared payment token and uses the existing payment method" do
+          WebMock.stub_request(:post, "https://api.stripe.com/v1/payment_intents")
+            .with(body: ->(request) {
+              params = Rack::Utils.parse_nested_query(request)
+              expect(params).not_to have_key("payment_method_data")
+              expect(params["payment_method"]).to eq("pm_existing")
+            })
+            .to_return(body: stripe_payment_intent_data.to_json)
+
+          result = create_service.call
+
+          expect(result).to be_success
+          expect(Stripe::Customer).to have_received(:list_payment_methods).once
+        end
       end
     end
 
@@ -300,6 +385,7 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
               status: "pending",
               payment_provider: stripe_payment_provider,
               payment_provider_customer: stripe_customer,
+              payment_method:,
               amount_cents: payable.total_amount_cents,
               amount_currency: payable.currency,
               provider_payment_id: nil
@@ -406,6 +492,39 @@ RSpec.describe PaymentProviders::Stripe::Payments::CreateService do
               expect(invoice.reload.payment_status).to eq "pending"
             end
           end
+        end
+      end
+
+      context "when the payment activates a payment-gated subscription without 3ds support" do
+        let(:subscription) { create(:subscription, :incomplete, organization:, customer:) }
+        let(:invoice) do
+          create(
+            :invoice,
+            :open,
+            :with_subscriptions,
+            subscriptions: [subscription],
+            organization:,
+            customer:,
+            total_amount_cents: 200,
+            currency:,
+            ready_for_payment_processing: true
+          )
+        end
+
+        before { create(:subscription_activation_rule, subscription:, status: "pending") }
+
+        it "retries the payment to offer the authentication challenge" do
+          WebMock.stub_request(:post, "https://api.stripe.com/v1/payment_intents")
+            .to_return(
+              status: 400,
+              body: get_stripe_fixtures("payment_intent_authentication_required_response.json", version: "2025-04-30.basil")
+            )
+
+          result = create_service.call
+
+          expect(result).to be_failure
+          expect(result.error_code).to eq "authentication_required"
+          expect(result.should_retry).to eq true
         end
       end
     end

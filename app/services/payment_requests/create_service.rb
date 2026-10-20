@@ -2,6 +2,8 @@
 
 module PaymentRequests
   class CreateService < BaseService
+    Result = BaseResult[:payment_request, :payment_method]
+
     def initialize(organization:, params:, dunning_campaign: nil)
       @organization = organization
       @params = params
@@ -38,7 +40,7 @@ module PaymentRequests
         SendWebhookJob.perform_later("payment_request.created", payment_request)
         Utils::ActivityLog.produce(payment_request, "payment_request.created")
 
-        payment_result = PaymentRequests::Payments::CreateService.call_async(payable: payment_request, payment_method_params: payment_method)
+        payment_result = PaymentRequests::Payments::CreateService.call_async(payable: payment_request, payment_method_params:)
         PaymentRequestMailer.with(payment_request:).requested.deliver_later unless payment_result.success?
       end
 
@@ -65,6 +67,7 @@ module PaymentRequests
       # - the invoices have different currencies
       # - the invoices have different billing entities
       # - the invoices are not ready for payment processing
+      # - the requested payment method is invalid
 
       return result.forbidden_failure! unless License.premium?
       return result.not_found_failure!(resource: "customer") unless customer
@@ -83,8 +86,16 @@ module PaymentRequests
       end
 
       if invoices.exists?(ready_for_payment_processing: false)
-        result.not_allowed_failure!(code: "invoices_not_ready_for_payment_processing")
+        return result.not_allowed_failure!(code: "invoices_not_ready_for_payment_processing")
       end
+
+      valid_payment_method?
+    end
+
+    def valid_payment_method?
+      result.payment_method = payment_method
+
+      PaymentMethods::ValidateService.new(result, payment_method: payment_method_params).valid?
     end
 
     def customer
@@ -92,15 +103,22 @@ module PaymentRequests
     end
 
     def invoices
-      @invoices ||= customer.invoices.where(id: params[:lago_invoice_ids])
+      @invoices ||= customer.invoices.where.not(status: :deleted).where(id: params[:lago_invoice_ids])
     end
 
     def email
       @email ||= params[:email] || customer.email
     end
 
+    def payment_method_params
+      @payment_method_params ||= params[:payment_method]&.to_h || {}
+    end
+
     def payment_method
-      @payment_method ||= params[:payment_method]&.to_h || {}
+      return @payment_method if defined?(@payment_method)
+      return @payment_method = nil if payment_method_params[:payment_method_id].blank?
+
+      @payment_method = customer.payment_methods.find_by(id: payment_method_params[:payment_method_id])
     end
 
     def currency

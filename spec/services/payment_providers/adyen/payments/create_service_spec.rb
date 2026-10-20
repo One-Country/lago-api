@@ -5,8 +5,14 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Adyen::Payments::CreateService do
   subject(:create_service) { described_class.new(payment:, reference:, metadata:) }
 
-  let(:customer) { create(:customer, payment_provider_code: code) }
-  let(:organization) { customer.organization }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:code) { "adyen_1" }
+  let_it_be(:customer) { create(:customer, payment_provider_code: code) }
+
+  before_all do
+    create_default(:plan)
+  end
+
   let(:adyen_payment_provider) { create(:adyen_provider, organization:, code:) }
   let(:adyen_customer) { create(:adyen_customer, customer:, payment_provider: adyen_payment_provider) }
   let(:adyen_client) { instance_double(Adyen::Client) }
@@ -16,7 +22,6 @@ RSpec.describe PaymentProviders::Adyen::Payments::CreateService do
   let(:checkout) { Adyen::Checkout.new(adyen_client, 70) }
   let(:payments_response) { generate(:adyen_payments_response) }
   let(:payment_methods_response) { generate(:adyen_payment_methods_response) }
-  let(:code) { "adyen_1" }
   let(:reference) { "organization.name - Invoice #{invoice.number}" }
   let(:metadata) do
     {
@@ -91,10 +96,6 @@ RSpec.describe PaymentProviders::Adyen::Payments::CreateService do
     context "when payment has a payment method" do
       let(:payment_method) { create(:payment_method, payment_provider_customer: adyen_customer, provider_method_id: "pm_test") }
 
-      before do
-        organization.enable_feature_flag!(:multiple_payment_methods)
-      end
-
       it "uses payment method provider id" do
         result = create_service.call
 
@@ -106,6 +107,44 @@ RSpec.describe PaymentProviders::Adyen::Payments::CreateService do
               paymentMethod: hash_including(storedPaymentMethodId: "pm_test")
             ), anything
           )
+      end
+    end
+
+    context "when the reference fits within Adyen's limit" do
+      let(:reference) { "Hooli - Overdue invoices: #{invoice.number}" }
+
+      it "sends it through unchanged" do
+        create_service.call
+
+        expect(reference.length).to be <= described_class::REFERENCE_MAX_LENGTH
+        expect(payments_api).to have_received(:payments)
+          .with(hash_including(reference:), anything)
+      end
+    end
+
+    context "when a long billing entity name pushes the reference over Adyen's limit" do
+      let(:billing_entity_name) { "A" * 60 }
+      let(:reference) { "#{billing_entity_name} - Overdue invoices: #{invoice.number}" }
+
+      it "clamps it to the documented maximum" do
+        create_service.call
+
+        expect(reference.length).to be > described_class::REFERENCE_MAX_LENGTH
+        expect(payments_api).to have_received(:payments) do |params, _headers|
+          expect(params[:reference].length).to eq(described_class::REFERENCE_MAX_LENGTH)
+        end
+      end
+
+      # NOTE: BIL-371 appends the invoice number to the END of the reference, so
+      #       trimming from the right would drop the very thing the ticket adds.
+      #       Keep the tail and lose the billing entity name instead.
+      it "keeps the invoice number and drops the head" do
+        create_service.call
+
+        expect(payments_api).to have_received(:payments) do |params, _headers|
+          expect(params[:reference]).to end_with(invoice.number)
+          expect(params[:reference]).not_to start_with(billing_entity_name)
+        end
       end
     end
 
@@ -133,13 +172,14 @@ RSpec.describe PaymentProviders::Adyen::Payments::CreateService do
     end
 
     context "with validation error on adyen" do
-      let(:customer) { create(:customer, organization:, payment_provider_code: code) }
+      let_it_be(:customer) { create(:customer, organization:, payment_provider_code: code) }
 
       let(:subscription) do
         create(:subscription, organization:, customer:)
       end
 
-      let(:organization) do
+      let_it_be(:customer) { create(:customer, organization:, payment_provider_code: code) }
+      let_it_be(:organization) do
         create(:organization, webhook_url: "https://webhook.com")
       end
 

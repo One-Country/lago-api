@@ -72,6 +72,32 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
     invoice_subscription
   end
 
+  context "with a purchase order number" do
+    let(:invoice) do
+      create(
+        :invoice,
+        :with_purchase_order_number,
+        customer:,
+        organization:,
+        number: "LAGO-202509-CH-001",
+        payment_due_date: Date.parse("2025-09-15"),
+        issuing_date: Date.parse("2025-09-01"),
+        invoice_type: :subscription,
+        total_amount_cents: 10000,
+        currency: "USD",
+        fees_amount_cents: 10000,
+        sub_total_excluding_taxes_amount_cents: 10000,
+        sub_total_including_taxes_amount_cents: 10000,
+        coupons_amount_cents: 0
+      )
+    end
+
+    it "renders the purchase order number under the invoice number" do
+      expect(rendered_template).to include("Purchase Order Number")
+      expect(rendered_template).to include("PO-123")
+    end
+  end
+
   context "with a single standard charge fee" do
     let(:charge) do
       create(:standard_charge, :pay_in_advance, plan:, billable_metric:)
@@ -170,6 +196,10 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
   end
 
   context "with percentage charge with basic rate" do
+    let(:amount_cents) { 5550 }
+    let(:rate) { "5.55" }
+    let(:per_unit_total_amount) { "55.50" }
+
     let(:percentage_charge) do
       create(:percentage_charge, :pay_in_advance, plan:, billable_metric:)
     end
@@ -181,7 +211,7 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
         charge: percentage_charge,
         subscription:,
         pay_in_advance: true,
-        amount_cents: 5550,
+        amount_cents:,
         amount_currency: "USD",
         units: 100,
         unit_amount_cents: 55,
@@ -189,8 +219,8 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
         invoice_display_name: "Transaction Fee",
         amount_details: {
           "paid_units" => "100",
-          "rate" => "5.55",
-          "per_unit_total_amount" => "55.50"
+          "rate" => rate,
+          "per_unit_total_amount" => per_unit_total_amount
         },
         properties: {
           "from_datetime" => "2025-09-01 00:00:00",
@@ -206,9 +236,23 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
     end
+
+    context "when the rate contains a floating-point artifact" do
+      let(:amount_cents) { 90 }
+      let(:rate) { "0.8999999999999999" }
+      let(:per_unit_total_amount) { "0.90" }
+
+      it "renders correctly" do
+        expect(rendered_template).to match_html_snapshot
+      end
+    end
   end
 
   context "with percentage charge with detailed breakdown" do
+    let(:amount_cents) { 7550 }
+    let(:rate) { "5.55" }
+    let(:per_unit_total_amount) { "55.50" }
+
     let(:percentage_charge) do
       create(:percentage_charge, :pay_in_advance, plan:, billable_metric:)
     end
@@ -220,15 +264,15 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
         charge: percentage_charge,
         subscription:,
         pay_in_advance: true,
-        amount_cents: 7550,
+        amount_cents:,
         amount_currency: "USD",
         units: 100,
         events_count: 50,
         invoice_display_name: "Payment Processing Fee",
         amount_details: {
           "paid_units" => "100",
-          "rate" => "5.55",
-          "per_unit_total_amount" => "55.50",
+          "rate" => rate,
+          "per_unit_total_amount" => per_unit_total_amount,
           "fixed_fee_unit_amount" => "0.20",
           "fixed_fee_total_amount" => "20.00",
           "min_max_adjustment_total_amount" => "0.00",
@@ -248,6 +292,16 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
 
     it "renders correctly" do
       expect(rendered_template).to match_html_snapshot
+    end
+
+    context "when the rate contains a floating-point artifact" do
+      let(:amount_cents) { 2070 }
+      let(:rate) { "0.7000000000000001" }
+      let(:per_unit_total_amount) { "0.70" }
+
+      it "renders correctly" do
+        expect(rendered_template).to match_html_snapshot
+      end
     end
   end
 
@@ -507,6 +561,58 @@ RSpec.describe "templates/invoices/v4/charge.slim" do
     before do
       charge_fee
       applied_tax
+    end
+
+    it "renders correctly" do
+      expect(rendered_template).to match_html_snapshot
+    end
+  end
+
+  context "with presentation breakdowns" do
+    let(:charge) do
+      create(
+        :standard_charge,
+        :pay_in_advance,
+        plan:,
+        billable_metric:,
+        invoice_display_name: "API Calls",
+        properties: {
+          "amount" => "100",
+          "presentation_group_keys" => [
+            {"value" => "region", "options" => {"display_in_invoice" => true}},
+            {"value" => "env", "options" => {"display_in_invoice" => true}}
+          ]
+        }
+      )
+    end
+
+    let(:charge_fee) do
+      create(
+        :charge_fee,
+        invoice:,
+        charge:,
+        subscription:,
+        pay_in_advance: true,
+        amount_cents: 10000,
+        amount_currency: "USD",
+        units: 100,
+        unit_amount_cents: 100,
+        precise_unit_amount: 1.00,
+        invoice_display_name: "API Calls",
+        grouped_by: {},
+        properties: {
+          "from_datetime" => "2025-09-01 00:00:00",
+          "to_datetime" => "2025-09-30 23:59:59",
+          "charges_from_datetime" => "2025-09-01 00:00:00",
+          "charges_to_datetime" => "2025-09-30 23:59:59"
+        }
+      )
+    end
+
+    before do
+      charge_fee
+      create(:presentation_breakdown, fee: charge_fee, units: 60, presentation_by: {"region" => "us", "env" => "prod"})
+      create(:presentation_breakdown, fee: charge_fee, units: 40, presentation_by: {"region" => "eu", "env" => "prod"})
     end
 
     it "renders correctly" do

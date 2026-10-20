@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe Customer do
   subject(:customer) { create(:customer) }
 
-  let(:organization) { create(:organization) }
-  let(:billing_entity) { create(:billing_entity, organization:) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:billing_entity, refind: true) { create_default(:billing_entity, organization:) }
 
   it_behaves_like "paper_trail traceable"
 
@@ -18,6 +18,9 @@ RSpec.describe Customer do
   it { is_expected.to have_many(:payment_methods) }
   it { is_expected.to have_many(:payment_requests) }
   it { is_expected.to have_many(:error_details).dependent(:destroy) }
+  it { is_expected.to have_many(:order_forms) }
+  it { is_expected.to have_many(:orders) }
+  it { is_expected.to have_many(:usage_attribution_values) }
 
   it { is_expected.to have_one(:netsuite_customer) }
   it { is_expected.to have_one(:anrok_customer) }
@@ -82,11 +85,43 @@ RSpec.describe Customer do
         expect(described_class.normalize_value_for(field, "")).to be_nil
       end
     end
+
+    it "strips null bytes from identity and free-text attributes" do
+      normalized_customer = build(
+        :customer,
+        name: "Foo\u0000Bar",
+        firstname: "Jo\u0000hn",
+        lastname: "Do\u0000e",
+        legal_name: "Foo\u0000Corp",
+        legal_number: "12\u000034",
+        phone: "555\u00000199",
+        url: "https://ex\u0000ample.test",
+        logo_url: "https://ex\u0000ample.test/l.png",
+        tax_identification_number: "FR\u000012345"
+      )
+
+      expect(normalized_customer.name).to eq("FooBar")
+      expect(normalized_customer.firstname).to eq("John")
+      expect(normalized_customer.lastname).to eq("Doe")
+      expect(normalized_customer.legal_name).to eq("FooCorp")
+      expect(normalized_customer.legal_number).to eq("1234")
+      expect(normalized_customer.phone).to eq("5550199")
+      expect(normalized_customer.url).to eq("https://example.test")
+      expect(normalized_customer.logo_url).to eq("https://example.test/l.png")
+      expect(normalized_customer.tax_identification_number).to eq("FR12345")
+    end
+
+    it "keeps empty identity values as empty strings (not nil)" do
+      normalized_customer = build(:customer, firstname: "\u0000", lastname: "\u0000")
+
+      expect(normalized_customer.firstname).to eq("")
+      expect(normalized_customer.lastname).to eq("")
+    end
   end
 
   describe "validations" do
     subject(:customer) do
-      described_class.new(organization:, external_id:)
+      described_class.new(organization:, external_id:, billing_entity:)
     end
 
     let(:external_id) { SecureRandom.uuid }
@@ -116,6 +151,21 @@ RSpec.describe Customer do
 
       customer.timezone = "America/Guadeloupe"
       expect(customer).not_to be_valid
+    end
+
+    it "validates the name length" do
+      customer.name = "a" * 255
+      expect(customer).to be_valid
+
+      customer.name = "a" * 256
+      expect(customer).not_to be_valid
+    end
+
+    it "does not validate the name length when the name is unchanged" do
+      customer.save
+      customer.update_column(:name, "a" * 256) # rubocop:disable Rails/SkipsModelValidations
+      customer.timezone = "Europe/Paris"
+      expect(customer).to be_valid
     end
 
     describe "of email" do
@@ -310,6 +360,87 @@ RSpec.describe Customer do
     end
 
     it { is_expected.to validate_inclusion_of(:customer_type).in_array(described_class::CUSTOMER_TYPES.keys) }
+
+    describe "x402_agent_address validation" do
+      subject(:customer) { build(:customer, x402_agent_address:) }
+
+      before { customer.valid? }
+
+      context "with a lowercase EVM address" do
+        let(:x402_agent_address) { "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed" }
+
+        it "stores the checksummed address" do
+          expect(customer.errors).to be_empty
+          expect(customer.x402_agent_address).to eq("0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed")
+        end
+      end
+
+      context "with a Solana address" do
+        let(:x402_agent_address) { "2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4" }
+
+        it "stores the address verbatim" do
+          expect(customer.errors).to be_empty
+          expect(customer.x402_agent_address).to eq("2wKupLR9q6wXYppw8Gr2NvWxKBUqm4PPJKkQfoxHDBg4")
+        end
+      end
+
+      context "with a wrong EIP-55 checksum" do
+        let(:x402_agent_address) { "0x5AAeb6053F3E94C9b9A09f33669435E7Ef1BeAed" }
+
+        it { expect(customer.errors.messages[:x402_agent_address]).to eq(["invalid_format"]) }
+      end
+
+      context "with a malformed address" do
+        let(:x402_agent_address) { "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beae" }
+
+        it { expect(customer.errors.messages[:x402_agent_address]).to eq(["invalid_format"]) }
+      end
+
+      context "without an address" do
+        let(:x402_agent_address) { nil }
+
+        it { expect(customer.errors.messages[:x402_agent_address]).to be_empty }
+      end
+    end
+  end
+
+  describe "x402_agent_address after creation" do
+    subject(:customer) { create(:customer, x402_agent_address: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed") }
+
+    it "refuses a new address" do
+      expect { customer.x402_agent_address = "0xfB6916095ca1df60bB79Ce92cE3Ea74c37c5d359" }
+        .to raise_error(ActiveRecord::ReadonlyAttributeError)
+    end
+
+    it "updates the other attributes" do
+      expect(customer.update(name: "Agent")).to be(true)
+    end
+  end
+
+  describe "x402_agent_address uniqueness" do
+    subject(:duplicate) { build(:customer, organization:, x402_agent_address: address) }
+
+    let(:address) { "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed" }
+    let(:deleted_at) { nil }
+
+    before { create(:customer, organization:, x402_agent_address: address, deleted_at:) }
+
+    it "refuses a second customer of the organization" do
+      expect { duplicate.save! }
+        .to raise_error(ActiveRecord::RecordNotUnique, /index_customers_on_organization_id_and_x402_agent_address/)
+    end
+
+    context "when the first customer is deleted" do
+      let(:deleted_at) { Time.current }
+
+      it { expect(duplicate.save).to be(true) }
+    end
+
+    context "with another organization" do
+      subject(:duplicate) { build(:customer, organization: create(:organization), x402_agent_address: address) }
+
+      it { expect(duplicate.save).to be(true) }
+    end
   end
 
   describe ".awaiting_wallet_refresh" do
@@ -351,6 +482,32 @@ RSpec.describe Customer do
 
     it "returns customers that have no dunning campaign but should" do
       expect(subject).to contain_exactly(scoped)
+    end
+  end
+
+  describe ".by_x402_agent_address" do
+    subject(:customers) { described_class.by_x402_agent_address(address) }
+
+    let!(:agent) { create(:customer, x402_agent_address: "0x5aAeb6053F3E94C9b9A09f33669435E7Ef1BeAed") }
+
+    before { create(:customer) }
+
+    context "with a lowercase variant" do
+      let(:address) { "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beaed" }
+
+      it { expect(customers).to contain_exactly(agent) }
+    end
+
+    context "with a malformed address" do
+      let(:address) { "0x5aaeb6053f3e94c9b9a09f33669435e7ef1beae" }
+
+      it { expect(customers).to be_empty }
+    end
+
+    context "without an address" do
+      let(:address) { nil }
+
+      it { expect(customers).to be_empty }
     end
   end
 
@@ -623,6 +780,34 @@ RSpec.describe Customer do
     end
   end
 
+  describe "#payment_connection_status" do
+    subject { customer.payment_connection_status }
+
+    let(:customer) { create(:customer, organization:) }
+
+    context "when the customer has no payment connection" do
+      it { is_expected.to eq("not_connected") }
+    end
+
+    context "when no payment connection is default" do
+      before { create(:stripe_customer, customer:, is_default: false) }
+
+      it { is_expected.to eq("not_connected") }
+    end
+
+    context "when a provider connection is default" do
+      before { create(:stripe_customer, customer:, is_default: true) }
+
+      it { is_expected.to eq("connected") }
+    end
+
+    context "when the manual connection is default" do
+      before { create(:manual_payment_provider_customer, customer:, is_default: true) }
+
+      it { is_expected.to eq("manual") }
+    end
+  end
+
   describe "#applicable_timezone" do
     subject(:customer) do
       described_class.new(billing_entity:, timezone: "Europe/Paris")
@@ -663,6 +848,14 @@ RSpec.describe Customer do
       expect(customer.applicable_invoice_grace_period).to eq(3)
     end
 
+    context "when another billing entity is provided" do
+      let(:other_billing_entity) { build(:billing_entity, invoice_grace_period: 7) }
+
+      it "keeps the customer invoice_grace_period" do
+        expect(customer.applicable_invoice_grace_period(billing_entity: other_billing_entity)).to eq(3)
+      end
+    end
+
     context "when customer does not have an invoice grace period" do
       let(:billing_entity_invoice_grace_period) { 5 }
 
@@ -673,6 +866,14 @@ RSpec.describe Customer do
 
       it "returns the billing entity invoice_grace_period" do
         expect(customer.applicable_invoice_grace_period).to eq(5)
+      end
+
+      context "when another billing entity is provided" do
+        let(:other_billing_entity) { build(:billing_entity, invoice_grace_period: 7) }
+
+        it "returns the provided billing entity invoice_grace_period" do
+          expect(customer.applicable_invoice_grace_period(billing_entity: other_billing_entity)).to eq(7)
+        end
       end
 
       context "when billing entity invoice_grace_period is nil" do
@@ -1134,7 +1335,7 @@ RSpec.describe Customer do
   describe "#overdue_balance_cents" do
     subject(:overdue_balance_cents) { customer.overdue_balance_cents }
 
-    let(:customer) { create(:customer, currency: "USD") }
+    let_it_be(:customer) { create(:customer, currency: "USD") }
 
     context "when there are no overdue invoices" do
       before do
@@ -1200,7 +1401,7 @@ RSpec.describe Customer do
   end
 
   describe "#overdue_balances" do
-    let(:customer) { create(:customer, currency: "USD") }
+    let_it_be(:customer) { create(:customer, currency: "USD") }
 
     context "when there are no overdue invoices" do
       it "returns an empty hash" do
@@ -1263,8 +1464,8 @@ RSpec.describe Customer do
   end
 
   describe "#reset_dunning_campaign_for_currency!" do
-    let(:last_dunning_campaign_attempt_at) { 1.day.ago }
-    let(:customer) do
+    let_it_be(:last_dunning_campaign_attempt_at) { 1.day.ago }
+    let_it_be(:customer, refind: true) do
       create(
         :customer,
         last_dunning_campaign_attempt: 5,
@@ -1374,6 +1575,37 @@ RSpec.describe Customer do
       it "returns nil" do
         expect(customer.tax_customer).to eq(nil)
       end
+    end
+  end
+
+  describe "#payment_connection" do
+    let_it_be(:customer) { create(:customer) }
+    let!(:default_connection) { create(:stripe_customer, customer:, code: "stripe_eu", is_default: true) }
+    let!(:other_connection) { create(:gocardless_customer, customer:, code: "gc") }
+
+    it "returns the default connection when no code is given" do
+      expect(customer.payment_connection).to eq(default_connection)
+    end
+
+    it "returns the connection matching the given code" do
+      expect(customer.payment_connection("gc")).to eq(other_connection)
+    end
+
+    it "returns nil for an unknown code" do
+      expect(customer.payment_connection("unknown")).to be_nil
+    end
+  end
+
+  describe "#integration_connection" do
+    let(:customer) { create(:customer) }
+    let!(:default_connection) { create(:netsuite_customer, customer:, is_default: true) }
+
+    it "returns the default connection of the category" do
+      expect(customer.integration_connection("accounting")).to eq(default_connection)
+    end
+
+    it "returns nil when no connection is default in the category" do
+      expect(customer.integration_connection("crm")).to be_nil
     end
   end
 

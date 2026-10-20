@@ -5,6 +5,11 @@ require "rails_helper"
 RSpec.describe Wallets::Balance::IncreaseService do
   subject(:create_service) { described_class.new(wallet:, wallet_transaction:) }
 
+  before_all do
+    create_default(:organization)
+    create_default(:customer)
+  end
+
   let(:credits_amount) { BigDecimal("4.5") }
   let(:wallet) do
     create(
@@ -38,11 +43,9 @@ RSpec.describe Wallets::Balance::IncreaseService do
       expect(wallet.credits_balance).to eq(14.5)
     end
 
-    it "refreshes wallet ongoing balance" do
-      call_and_reload_wallet
-
-      expect(wallet.ongoing_balance_cents).to eq(1450)
-      expect(wallet.credits_ongoing_balance).to eq(14.5)
+    it "enqueues a RefreshWalletJob targeting the wallet" do
+      expect { create_service.call }
+        .to have_enqueued_job_after_commit(Customers::RefreshWalletJob).with(wallet.customer, wallet_ids: [wallet.id])
     end
 
     it "sends a `wallet.updated` webhook" do

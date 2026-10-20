@@ -5,14 +5,17 @@ module PaymentRequests
     class FlutterwaveService < BaseService
       include Customers::PaymentProviderFinder
       include Updatable
+      include TypedResults
 
-      def initialize(payable = nil)
+      RESULTS = {
+        generate_payment_url: BaseResult[:payment_url],
+        update_payment_status: BaseResult[:payment, :payable]
+      }.freeze
+
+      private
+
+      def generate_payment_url(payable)
         @payable = payable
-
-        super(nil)
-      end
-
-      def call
         result.payment_url = payment_url
         result
       rescue LagoHttpClient::HttpError => e
@@ -21,7 +24,7 @@ module PaymentRequests
         result.service_failure!(code: "action_script_runtime_error", message: e.message)
       end
 
-      def update_payment_status(organization_id:, status:, flutterwave_payment:)
+      def update_payment_status(organization_id:, status:, flutterwave_payment:, amount_cents: nil)
         payment = if flutterwave_payment.metadata[:payment_type] == "one-time"
           create_payment(flutterwave_payment)
         else
@@ -29,8 +32,9 @@ module PaymentRequests
         end
         return result.not_found_failure!(resource: "flutterwave_payment") unless payment
 
+        @payable = payment.payable
         result.payment = payment
-        result.payable = payment.payable
+        result.payable = @payable
         return result if payment.payable.payment_succeeded?
 
         payment.status = status
@@ -52,8 +56,6 @@ module PaymentRequests
       rescue BaseService::FailedResult => e
         result.fail_with_error!(e)
       end
-
-      private
 
       attr_reader :payable
 
@@ -182,6 +184,8 @@ module PaymentRequests
 
       def update_invoices_payment_status(payment_status:, deliver_webhook: true)
         payable.invoices.each do |invoice|
+          next if invoice.payment_succeeded? && !payment_status_succeeded?(payment_status)
+
           Invoices::UpdateService.call(
             invoice:,
             params: {

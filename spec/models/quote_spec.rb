@@ -5,6 +5,9 @@ require "rails_helper"
 RSpec.describe Quote do
   subject(:quote) { create(:quote) }
 
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
+
   describe "enums" do
     it do
       expect(subject).to define_enum_for(:order_type)
@@ -26,9 +29,15 @@ RSpec.describe Quote do
       expect(subject).to belong_to(:subscription).optional
       expect(subject).to have_many(:quote_owners).dependent(:destroy)
       expect(subject).to have_many(:owners).through(:quote_owners)
-      expect(subject).to have_many(:versions).class_name("QuoteVersion").order(sequential_id: :desc)
-      expect(subject).to have_one(:current_version).class_name("QuoteVersion").order(sequential_id: :desc)
+      expect(subject).to have_many(:versions).class_name("QuoteVersion").order(sequential_id: :desc).inverse_of(:quote)
+      expect(subject).to have_one(:current_version).class_name("QuoteVersion").order(sequential_id: :desc).inverse_of(:quote)
+      expect(subject).to have_many(:order_forms).through(:versions)
+      expect(subject).to have_many_attached(:images)
     end
+  end
+
+  describe "Clickhouse associations", clickhouse: true do
+    it { is_expected.to have_many(:activity_logs).class_name("Clickhouse::ActivityLog") }
   end
 
   describe "validations" do
@@ -51,6 +60,16 @@ RSpec.describe Quote do
         quote = build(:quote, order_type: :one_off, subscription: nil)
         expect(quote).to be_valid
       end
+    end
+
+    describe "images validation" do
+      it do
+        expect(quote).to validate_content_type_of(:images)
+          .allowing("image/png", "image/jpeg", "image/webp", "image/gif")
+          .rejecting("application/pdf", "text/plain")
+      end
+
+      it { is_expected.to validate_size_of(:images).less_than(5.megabytes) }
     end
   end
 

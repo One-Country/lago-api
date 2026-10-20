@@ -27,9 +27,6 @@ module Utils
 
     def produce
       enqueue_task if AVAILABLE && message.present? && organization_id.present?
-    rescue => e
-      Rails.logger.error("Failed to produce email activity log: #{e.message}")
-      nil
     end
 
     private
@@ -63,8 +60,9 @@ module Utils
         external_customer_id:,
         external_subscription_id: nil
       }
-      Karafka.producer.produce_async(
+      KafkaProducer.produce_async(
         topic: TOPIC,
+        invalid_message_level: :warning,
         key: "#{organization_id}--#{activity_id}",
         payload: payload.to_json
       )

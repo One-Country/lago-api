@@ -5,10 +5,10 @@ require "rails_helper"
 RSpec.describe FixedCharges::DestroyService do
   subject(:destroy_service) { described_class.new(fixed_charge:) }
 
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:membership, refind: true) { create(:membership) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create(:add_on, organization:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, add_on:) }
 
   describe "#call" do
@@ -84,18 +84,17 @@ RSpec.describe FixedCharges::DestroyService do
     context "with cascade_updates" do
       subject(:destroy_service) { described_class.new(fixed_charge:, cascade_updates: true) }
 
-      let(:child_plan) { create(:plan, organization:, parent: plan) }
+      let_it_be(:child_plan, refind: true) { create(:plan, organization:, parent: plan) }
       let(:child_fixed_charge) { create(:fixed_charge, plan: child_plan, add_on:, parent: fixed_charge) }
 
       before do
         child_fixed_charge
-        allow(FixedCharges::DestroyChildrenJob).to receive(:perform_later)
       end
 
       it "enqueues FixedCharges::DestroyChildrenJob" do
         destroy_service.call
 
-        expect(FixedCharges::DestroyChildrenJob).to have_received(:perform_later).with(fixed_charge.id)
+        expect(FixedCharges::DestroyChildrenJob).to have_been_enqueued.with(fixed_charge.id)
       end
 
       context "when fixed_charge has no children" do
@@ -104,7 +103,7 @@ RSpec.describe FixedCharges::DestroyService do
         it "does not enqueue FixedCharges::DestroyChildrenJob" do
           destroy_service.call
 
-          expect(FixedCharges::DestroyChildrenJob).not_to have_received(:perform_later)
+          expect(FixedCharges::DestroyChildrenJob).not_to have_been_enqueued
         end
       end
     end
@@ -115,13 +114,12 @@ RSpec.describe FixedCharges::DestroyService do
 
       before do
         child_fixed_charge
-        allow(FixedCharges::DestroyChildrenJob).to receive(:perform_later)
       end
 
       it "does not enqueue FixedCharges::DestroyChildrenJob" do
         destroy_service.call
 
-        expect(FixedCharges::DestroyChildrenJob).not_to have_received(:perform_later)
+        expect(FixedCharges::DestroyChildrenJob).not_to have_been_enqueued
       end
     end
   end

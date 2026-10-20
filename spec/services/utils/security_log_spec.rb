@@ -53,8 +53,8 @@ RSpec.describe Utils::SecurityLog do
       )
     end
 
-    let(:organization) { create(:organization, premium_integrations: ["security_logs"]) }
-    let(:membership) { create(:membership, organization:) }
+    let_it_be(:organization) { create(:organization, premium_integrations: ["security_logs"]) }
+    let_it_be(:membership) { create(:membership, organization:) }
     let(:user) { membership.user }
     let(:api_key) { create(:api_key, organization:) }
 
@@ -98,6 +98,7 @@ RSpec.describe Utils::SecurityLog do
     end
 
     context "when security_logs is not enabled for organization" do
+      let(:membership) { create(:membership, organization:) }
       let(:organization) { create(:organization, premium_integrations: []) }
 
       it "does not produce and returns false" do
@@ -119,6 +120,7 @@ RSpec.describe Utils::SecurityLog do
         )
       end
 
+      let(:membership) { create(:membership, organization:) }
       let(:organization) { create(:organization, premium_integrations: []) }
 
       it "produces the event on kafka" do
@@ -268,6 +270,35 @@ RSpec.describe Utils::SecurityLog do
         expect(karafka_producer).to have_received(:produce_async) do |args|
           payload = JSON.parse(args[:payload])
           expect(payload["device_info"]).to eq({"browser" => "Chrome", "os" => "Mac OS"})
+        end
+      end
+    end
+
+    [
+      {exception: WaterDrop::Errors::ProduceError, message: "#<Rdkafka::RdkafkaError: Local: Unknown topic (unknown_topic)>", level: :error},
+      {exception: WaterDrop::Errors::MessageInvalidError, message: "Message is too large", level: :warning}
+    ].each do |error_context|
+      exception = error_context[:exception]
+      message = error_context[:message]
+      level = error_context[:level]
+      context "when producer raises #{exception}" do
+        before do
+          allow(karafka_producer).to receive(:produce_async).and_raise(exception.new(message))
+        end
+
+        context "when sentry is configured", :sentry do
+          it "captures the exception with the #{level} level and returns false" do
+            expect(produce).to be false
+            expect(sentry_events).to include_sentry_event(exception: exception, message: message)
+            expect(sentry_events.last.level).to eq(level)
+          end
+        end
+
+        context "when sentry is not configured" do
+          it "re-raises the error" do
+            expect { produce }.to raise_error(exception, message)
+            expect(sentry_events).to be_empty
+          end
         end
       end
     end

@@ -16,10 +16,19 @@ module Subscriptions
 
     def call
       return result.not_found_failure!(resource: "subscription") if subscription.blank?
-      return result.not_allowed_failure!(code: "subscription_incomplete") if subscription.incomplete?
 
-      ActiveRecord::Base.transaction do
-        if subscription.pending?
+      cancel_incomplete_subscription = false
+      subscription_changed = false
+
+      subscription.with_lock do
+        if subscription.incomplete?
+          cancel_incomplete
+          cancel_incomplete_subscription = true
+        elsif subscription.canceled?
+          result.single_validation_failure!(error_code: "subscription_canceled")
+        elsif !upgrade && subscription.next_subscription&.incomplete?
+          result.single_validation_failure!(error_code: "next_subscription_incomplete")
+        elsif subscription.pending?
           previous = subscription.previous_subscription
           subscription.mark_as_canceled!
 
@@ -27,6 +36,8 @@ module Subscriptions
             SendWebhookJob.perform_after_commit("subscription.updated", previous)
             Utils::ActivityLog.produce_after_commit(previous, "subscription.updated")
           end
+
+          subscription_changed = true
         elsif !subscription.terminated?
           subscription.mark_as_terminated!
           update_on_termination_actions!
@@ -58,13 +69,19 @@ module Subscriptions
           #       For upgrade we will create only one invoice for termination charges and for in advance charges
           #       It is handled in subscriptions/create_service.rb
           bill_subscription unless upgrade
+
+          subscription_changed = true
         end
 
-        cancel_next_subscription
+        cancel_next_subscription if subscription_changed
       end
 
-      SendWebhookJob.perform_after_commit("subscription.terminated", subscription)
-      Utils::ActivityLog.produce_after_commit(subscription, "subscription.terminated")
+      return result if result.failure? || cancel_incomplete_subscription
+
+      if subscription_changed
+        SendWebhookJob.perform_after_commit("subscription.terminated", subscription)
+        Utils::ActivityLog.produce_after_commit(subscription, "subscription.terminated")
+      end
 
       result.subscription = subscription
       result
@@ -78,64 +95,38 @@ module Subscriptions
       return result unless next_subscription
       return result unless next_subscription.pending?
 
-      rotation_date = Time.zone.at(timestamp)
+      activation_result = Subscriptions::ActivateService.call!(
+        subscription: next_subscription,
+        timestamp: Time.zone.at(timestamp)
+      )
 
-      ActiveRecord::Base.transaction do
-        subscription.mark_as_terminated!(rotation_date)
-
-        if subscription.should_sync_hubspot_subscription?
-          Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob.perform_later(subscription:)
-        end
-
-        next_subscription.mark_as_active!(rotation_date)
-
-        EmitFixedChargeEventsService.call!(
-          subscriptions: [next_subscription],
-          timestamp: next_subscription.started_at + 1.second
-        )
-
-        if next_subscription.should_sync_hubspot_subscription?
-          Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob.perform_later(next_subscription)
-        end
-      end
-
-      # NOTE: Create an invoice for the terminated subscription
-      #       if it has not been billed yet
-      #       or only for the charges if subscription was billed in advance
-      #       Also, add new pay in advance plan inside if applicable
-      billable_subscriptions = if next_subscription.plan.pay_in_advance? || next_subscription.fixed_charges.pay_in_advance.any?
-        [subscription, next_subscription]
-      else
-        [subscription]
-      end
-      BillSubscriptionJob.perform_later(billable_subscriptions, timestamp, invoicing_reason: :upgrading)
-      BillNonInvoiceableFeesJob.perform_later([subscription], rotation_date) # Ignore next subscription since there can't be events
-
-      SendWebhookJob.perform_later("subscription.terminated", subscription)
-      Utils::ActivityLog.produce(subscription, "subscription.terminated")
-      SendWebhookJob.perform_later("subscription.started", next_subscription)
-      Utils::ActivityLog.produce(next_subscription, "subscription.started")
-
-      result.subscription = next_subscription
-
+      result.subscription = activation_result.subscription
       result
-    rescue ActiveRecord::RecordInvalid => e
-      result.record_validation_failure!(record: e.record)
     end
 
     private
 
     attr_reader :subscription, :async, :upgrade, :on_termination_credit_note, :on_termination_invoice
 
+    def cancel_incomplete
+      cancel_result = Subscriptions::ActivationRules::CancelService.call!(
+        subscription:,
+        rule_status: :declined,
+        cancellation_reason: :manual
+      )
+
+      result.subscription = cancel_result.subscription
+      result
+    end
+
     def cancel_next_subscription
+      # NOTE: Upgrade path: next_subscription is the new subscription we just persisted, not a stale scheduled change
+      return if upgrade
+
       next_subscription = subscription.next_subscription
       return if next_subscription.nil?
 
       next_subscription.mark_as_canceled!
-
-      if next_subscription.should_sync_hubspot_subscription?
-        Integrations::Aggregator::Subscriptions::Hubspot::UpdateJob.perform_after_commit(subscription: next_subscription)
-      end
     end
 
     def bill_subscription

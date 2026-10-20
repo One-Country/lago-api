@@ -6,7 +6,8 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::PaymentIntentPaymentFailedSer
   subject(:event_service) { described_class.new(organization_id: organization.id, event:) }
 
   let(:event) { ::Stripe::Event.construct_from(JSON.parse(event_json)) }
-  let(:organization) { create(:organization) }
+
+  let_it_be(:organization) { create(:organization) }
 
   ["2020-08-27", "2024-09-30.acacia", "2025-04-30.basil"].each do |version|
     context "when payment intent event" do
@@ -17,6 +18,7 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::PaymentIntentPaymentFailedSer
           .with(
             organization_id: organization.id,
             status: "failed",
+            amount_cents: anything,
             stripe_payment: PaymentProviders::StripeProvider::StripePayment
           ).and_call_original
 
@@ -38,6 +40,7 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::PaymentIntentPaymentFailedSer
           .with(
             organization_id: organization.id,
             status: "failed",
+            amount_cents: anything,
             stripe_payment: PaymentProviders::StripeProvider::StripePayment
           ).and_call_original
 
@@ -64,6 +67,7 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::PaymentIntentPaymentFailedSer
           .with(
             organization_id: organization.id,
             status: "failed",
+            amount_cents: anything,
             stripe_payment: PaymentProviders::StripeProvider::StripePayment
           ).and_call_original
 
@@ -101,6 +105,7 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::PaymentIntentPaymentFailedSer
         .with(
           organization_id: organization.id,
           status: "failed",
+          amount_cents: anything,
           stripe_payment: PaymentProviders::StripeProvider::StripePayment
         ).and_call_original
 

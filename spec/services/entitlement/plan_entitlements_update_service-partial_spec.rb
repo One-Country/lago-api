@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe Entitlement::PlanEntitlementsUpdateService do
   subject(:result) { described_class.call(organization:, plan:, entitlements_params:, partial: true) }
 
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:plan) { create(:plan, organization:) }
   let(:feature) { create(:feature, organization:) }
   let(:privilege) { create(:privilege, feature:, code: "max", value_type: "integer") }
   let(:privilege2) { create(:privilege, feature:, code: "max_admins", value_type: "integer") }
@@ -252,7 +252,13 @@ RSpec.describe Entitlement::PlanEntitlementsUpdateService do
           entitlement_value2
           entitlement_value3
 
-          allow(SendWebhookJob).to receive(:perform_after_commit)
+          # NOTE: SendWebhookJob.perform_later checks organization.webhook_endpoints,
+          #       which Bullet flags as an N+1. It is not part of this test.
+          Bullet.add_safelist(type: :n_plus_one_query, class_name: "Organization", association: :webhook_endpoints)
+        end
+
+        after do
+          Bullet.delete_safelist(type: :n_plus_one_query, class_name: "Organization", association: :webhook_endpoints)
         end
 
         it "does not trigger N+1 queries when updating multiple features and privileges" do

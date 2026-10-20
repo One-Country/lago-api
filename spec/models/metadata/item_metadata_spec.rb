@@ -5,9 +5,9 @@ require "rails_helper"
 RSpec.describe Metadata::ItemMetadata do
   subject(:item_metadata) { described_class.new(organization:, owner:, value:) }
 
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer) }
   let(:invoice) { create(:invoice, organization:) }
-  let(:customer) { invoice.customer }
   let(:owner) { create(:credit_note, invoice:, customer:, organization:) }
   let(:value) { {"key1" => "value1"} }
 
@@ -128,6 +128,49 @@ RSpec.describe Metadata::ItemMetadata do
         it "adds an error" do
           expect(item_metadata).not_to be_valid
           expect(item_metadata.errors[:value].join).to include("value for key 'foo' must be empty or a String up to 255 characters")
+        end
+      end
+
+      context "when value is a non-string leaf for every owner type" do
+        let(:owner) do
+          case owner_type
+          when :credit_note then create(:credit_note, invoice:, customer:, organization:)
+          when :wallet then create(:wallet, organization:)
+          when :plan then create(:plan, organization:)
+          end
+        end
+
+        [:credit_note, :wallet, :plan].each do |type|
+          context "when owner is a #{type}" do
+            let(:owner_type) { type }
+
+            context "when value is false" do
+              let(:value) { {"foo" => false} }
+
+              it "adds an error" do
+                expect(item_metadata).not_to be_valid
+                expect(item_metadata.errors[:value].join).to include("value for key 'foo' must be empty or a String up to 255 characters")
+              end
+            end
+
+            context "when value is an empty array" do
+              let(:value) { {"foo" => []} }
+
+              it "adds an error" do
+                expect(item_metadata).not_to be_valid
+                expect(item_metadata.errors[:value].join).to include("value for key 'foo' must be empty or a String up to 255 characters")
+              end
+            end
+
+            context "when value is an empty hash" do
+              let(:value) { {"foo" => {}} }
+
+              it "adds an error" do
+                expect(item_metadata).not_to be_valid
+                expect(item_metadata.errors[:value].join).to include("value for key 'foo' must be empty or a String up to 255 characters")
+              end
+            end
+          end
         end
       end
     end

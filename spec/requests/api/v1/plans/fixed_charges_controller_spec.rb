@@ -3,9 +3,9 @@
 require "rails_helper"
 
 RSpec.describe Api::V1::Plans::FixedChargesController do
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create_default(:add_on, organization:) }
 
   describe "GET /api/v1/plans/:plan_code/fixed_charges" do
     subject { get_with_token(organization, "/api/v1/plans/#{plan.code}/fixed_charges") }
@@ -216,14 +216,13 @@ RSpec.describe Api::V1::Plans::FixedChargesController do
 
       before do
         create(:subscription, plan: child_plan, status: :active)
-        allow(FixedCharges::CreateChildrenJob).to receive(:perform_later)
       end
 
       it "triggers cascade creation to children" do
         subject
 
         expect(response).to have_http_status(:success)
-        expect(FixedCharges::CreateChildrenJob).to have_received(:perform_later)
+        expect(FixedCharges::CreateChildrenJob).to have_been_enqueued
       end
     end
   end
@@ -292,14 +291,13 @@ RSpec.describe Api::V1::Plans::FixedChargesController do
       before do
         create(:subscription, plan: child_plan, status: :active)
         child_fixed_charge
-        allow(FixedCharges::UpdateChildrenJob).to receive(:perform_later)
       end
 
       it "passes cascade_updates to the service" do
         subject
 
         expect(response).to have_http_status(:success)
-        expect(FixedCharges::UpdateChildrenJob).to have_received(:perform_later)
+        expect(FixedCharges::UpdateChildrenJob).to have_been_enqueued
       end
     end
   end
@@ -343,16 +341,13 @@ RSpec.describe Api::V1::Plans::FixedChargesController do
       let(:child_plan) { create(:plan, organization:, parent: plan) }
       let(:child_fixed_charge) { create(:fixed_charge, plan: child_plan, organization:, add_on:, parent: fixed_charge) }
 
-      before do
-        child_fixed_charge
-        allow(FixedCharges::DestroyChildrenJob).to receive(:perform_later)
-      end
+      before { child_fixed_charge }
 
       it "cascades the deletion to children" do
         subject
 
         expect(response).to have_http_status(:success)
-        expect(FixedCharges::DestroyChildrenJob).to have_received(:perform_later).with(fixed_charge.id)
+        expect(FixedCharges::DestroyChildrenJob).to have_been_enqueued.with(fixed_charge.id)
       end
     end
   end

@@ -2,6 +2,8 @@
 
 module Invites
   class CreateService < BaseService
+    Result = BaseResult[:invite, :invite_url]
+
     def initialize(args)
       @args = args
       super
@@ -9,6 +11,7 @@ module Invites
 
     def call
       return result.forbidden_failure!(code: "cannot_grant_admin") if granting_admin_without_being_admin?
+      return result.forbidden_failure!(code: "cannot_grant_permissions") if granting_permissions_not_held?
       return result unless valid?(args)
 
       result.invite = Invite.create!(
@@ -19,7 +22,7 @@ module Invites
       )
 
       result.invite_url = build_invite_url(result.invite.token)
-      register_security_log
+      after_commit { register_security_log }
 
       result
     rescue ActiveRecord::RecordInvalid => e
@@ -59,8 +62,17 @@ module Invites
       !acting_membership&.admin?
     end
 
+    def granting_permissions_not_held?
+      return false if args[:skip_admin_check]
+
+      organization = args[:current_organization]
+      roles = Role.with_code(*Array(args[:roles])).with_organization(organization.id)
+      acting_membership = organization.memberships.active.find_by(user: args[:user])
+      !acting_membership&.can_grant_roles?(roles)
+    end
+
     def build_invite_url(token)
-      frontend_url = ENV.fetch("LAGO_FRONT_URL", "http://localhost:3000")
+      frontend_url = Rails.application.config.lago_front_url
       "#{frontend_url}/invitation/#{token}"
     end
   end

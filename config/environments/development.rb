@@ -60,6 +60,7 @@ Rails.application.configure do
   config.hosts << "api"
 
   config.license_url = ENV.fetch("LAGO_LICENSE_URL", "http://license:3000")
+  config.lago_front_url = ENV["LAGO_FRONT_URL"].presence || "http://localhost:3000"
   config.api_key_cache_ttl = 10.seconds
 
   config.action_mailer.perform_caching = false
@@ -67,8 +68,8 @@ Rails.application.configure do
   config.action_mailer.raise_delivery_errors = true
   config.action_mailer.delivery_method = :smtp
   config.action_mailer.smtp_settings = {
-    address: "mailhog",
-    port: 1025
+    address: ENV.fetch("LAGO_SMTP_ADDRESS", "mailpit"),
+    port: ENV.fetch("LAGO_SMTP_PORT", 1025)
   }
   config.action_mailer.preview_paths << Rails.root.join("spec/mailers/previews").to_s
 

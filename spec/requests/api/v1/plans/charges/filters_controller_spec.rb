@@ -3,9 +3,9 @@
 require "rails_helper"
 
 RSpec.describe Api::V1::Plans::Charges::FiltersController do
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
-  let(:billable_metric) { create(:billable_metric, organization:) }
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:billable_metric, refind: true) { create_default(:billable_metric, organization:) }
   let(:charge) { create(:standard_charge, plan:, organization:, billable_metric:) }
   let(:billable_metric_filter) { create(:billable_metric_filter, billable_metric:, key: "region", values: %w[us eu]) }
 
@@ -180,14 +180,13 @@ RSpec.describe Api::V1::Plans::Charges::FiltersController do
       before do
         create(:subscription, plan: child_plan, status: :active)
         child_charge
-        allow(ChargeFilters::CascadeJob).to receive(:perform_later)
       end
 
       it "triggers cascade to children" do
         subject
 
         expect(response).to have_http_status(:success)
-        expect(ChargeFilters::CascadeJob).to have_received(:perform_later)
+        expect(ChargeFilters::CascadeJob).to have_been_enqueued
       end
     end
 

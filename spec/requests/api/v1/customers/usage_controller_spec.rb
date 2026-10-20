@@ -83,10 +83,26 @@ RSpec.describe Api::V1::Customers::UsageController do
       expect(charge_usage[:billable_metric][:name]).to eq(metric.name)
       expect(charge_usage[:billable_metric][:code]).to eq(metric.code)
       expect(charge_usage[:billable_metric][:aggregation_type]).to eq("count_agg")
+      expect(charge_usage[:charge][:code]).to eq(charge.code)
       expect(charge_usage[:charge][:charge_model]).to eq("graduated")
       expect(charge_usage[:units]).to eq("4.0")
       expect(charge_usage[:amount_cents]).to eq(5)
       expect(charge_usage[:amount_currency]).to eq("EUR")
+    end
+
+    context "with the usage_prefilter_short_cache feature flag" do
+      before do
+        organization.enable_feature_flag!(:usage_prefilter_short_cache)
+        allow(Events::BillingPeriodFilterService).to receive(:for_charges!).and_call_original
+      end
+
+      it "caches the pre-filter for five seconds" do
+        subject
+
+        expect(response).to have_http_status(:success)
+        expect(Events::BillingPeriodFilterService).to have_received(:for_charges!)
+          .with(hash_including(combinations_cache_ttl: 15.seconds))
+      end
     end
 
     context "when apply_taxes is false" do

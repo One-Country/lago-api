@@ -43,12 +43,10 @@ RSpec.describe Mutations::RegisterUser do
     end
 
     it "returns user, organization and membership" do
-      aggregate_failures do
-        expect(result["data"]["registerUser"]["membership"]["id"]).to be_present
-        expect(result["data"]["registerUser"]["user"]["email"]).to eq("foo@bar.com")
-        expect(result["data"]["registerUser"]["organization"]["name"]).to eq("FooBar")
-        expect(result["data"]["registerUser"]["token"]).to be_present
-      end
+      expect(result["data"]["registerUser"]["membership"]["id"]).to be_present
+      expect(result["data"]["registerUser"]["user"]["email"]).to eq("foo@bar.com")
+      expect(result["data"]["registerUser"]["organization"]["name"]).to eq("FooBar")
+      expect(result["data"]["registerUser"]["token"]).to be_present
     end
 
     it_behaves_like "produces a security log", "user.signed_up" do
@@ -73,11 +71,29 @@ RSpec.describe Mutations::RegisterUser do
     let(:user) { create(:user) }
 
     it "returns an error" do
-      aggregate_failures do
-        expect_unprocessable_entity(result)
-        expect(result["errors"].first.dig("extensions", "details").keys).to include("email")
-        expect(result["errors"].first.dig("extensions", "details", "email")).to include("user_already_exists")
-      end
+      expect_unprocessable_entity(result)
+      expect(result["errors"].first.dig("extensions", "details").keys).to include("email")
+      expect(result["errors"].first.dig("extensions", "details", "email")).to include("user_already_exists")
+    end
+  end
+
+  context "with attempts throttling" do
+    let(:cache) { ActiveSupport::Cache::MemoryStore.new }
+    let(:request) { instance_double(ActionDispatch::Request, remote_ip: "203.0.113.10") }
+    let(:user) { create(:user) }
+
+    before { Auth::AttemptsThrottle.store = cache }
+
+    def register(email)
+      execute_graphql(query: mutation, request:, variables: {input: {email:, password: "ILoveLago", organizationName: "FooBar"}})
+    end
+
+    it "limits attempts per client IP" do
+      20.times { register(user.email) }
+
+      result = register("foo@bar.com")
+
+      expect(result["errors"].first.dig("extensions", "code")).to eq("too_many_requests")
     end
   end
 end

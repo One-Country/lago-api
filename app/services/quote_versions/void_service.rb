@@ -18,28 +18,43 @@ module QuoteVersions
       return result.not_found_failure!(resource: "quote_version") unless quote_version
       return result.forbidden_failure! unless order_forms_enabled?(quote_version.organization)
       return result.single_validation_failure!(field: :void_reason, error_code: "invalid") unless valid_reason?
-      return result.not_allowed_failure!(code: "inappropriate_state") unless voidable?
 
-      quote_version.update!(
-        status: :voided,
-        void_reason: reason,
-        voided_at: Time.current,
-        share_token: nil,
-        approved_at: nil
-      )
+      QuoteVersion.transaction do
+        Quotes::LockService.call(quote: quote_version.quote) do
+          quote_version.reload
+          next result.single_validation_failure!(field: :status, error_code: "not_voidable") unless voidable?
 
-      # TODO: SendWebhookJob.perform_after_commit("quote_version.voided", quote_version)
+          quote_version.update!(
+            status: :voided,
+            void_reason: reason,
+            voided_at: Time.current,
+            approved_at: nil
+          )
 
-      result.quote_version = quote_version
+          SendWebhookJob.perform_after_commit("quote.voided", quote_version)
+          Utils::ActivityLog.produce_after_commit(quote_version, "quote.voided")
+
+          result.quote_version = quote_version
+        end
+      end
+
       result
     rescue ActiveRecord::RecordInvalid => e
       result.record_validation_failure!(record: e.record)
+    rescue BaseLockService::FailedToAcquireLock
+      result.single_validation_failure!(field: :base, error_code: "concurrency_conflict")
     end
 
     private
 
     def voidable?
-      quote_version.draft?
+      return true if quote_version.draft?
+
+      quote_version.approved? && cascade_reason?
+    end
+
+    def cascade_reason?
+      QuoteVersion::CASCADE_VOID_REASONS.key?(reason.to_sym)
     end
 
     def valid_reason?

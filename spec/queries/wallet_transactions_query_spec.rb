@@ -13,19 +13,19 @@ RSpec.describe WalletTransactionsQuery do
   end
 
   let(:returned_ids) { result.wallet_transactions.pluck(:id) }
-
-  let(:wallet_id) { wallet.id }
-  let(:pagination) { nil }
-  let(:filters) { {} }
-
-  let(:membership) { create(:membership) }
-  let(:organization) { membership.organization }
-  let(:customer) { create(:customer, organization:) }
   let(:wallet) { create(:wallet, customer:) }
   let(:wallet_transaction_first) { create(:wallet_transaction, wallet:) }
   let(:wallet_transaction_second) { create(:wallet_transaction, wallet:) }
   let(:wallet_transaction_third) { create(:wallet_transaction, wallet:) }
   let(:wallet_transaction_fourth) { create(:wallet_transaction) }
+
+  let(:wallet_id) { wallet.id }
+  let(:pagination) { nil }
+  let(:filters) { {} }
+
+  let_it_be(:membership) { create(:membership) }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
 
   before do
     wallet_transaction_first
@@ -100,6 +100,54 @@ RSpec.describe WalletTransactionsQuery do
       expect(returned_ids).not_to include(wallet_transaction_second.id)
       expect(returned_ids).to include(wallet_transaction_third.id)
       expect(returned_ids).not_to include(wallet_transaction_fourth.id)
+    end
+  end
+
+  context "when filtering by metadata" do
+    let(:wallet_transaction_first) { create(:wallet_transaction, wallet:, metadata: [{"key" => "site_id", "value" => "alpha"}]) }
+    let(:wallet_transaction_second) { create(:wallet_transaction, wallet:, metadata: [{"key" => "site_id", "value" => "beta"}]) }
+    let(:wallet_transaction_third) { create(:wallet_transaction, wallet:, metadata: []) }
+
+    let(:filters) { {metadata: {"site_id" => "alpha"}} }
+
+    it "returns only the transaction tagged with that key and value" do
+      expect(returned_ids).to eq([wallet_transaction_first.id])
+    end
+
+    context "with several key/value pairs" do
+      let(:wallet_transaction_first) do
+        create(:wallet_transaction, wallet:, metadata: [{"key" => "site_id", "value" => "alpha"}, {"key" => "tier", "value" => "pro"}])
+      end
+      let(:filters) { {metadata: {"site_id" => "alpha", "tier" => "pro"}} }
+
+      it "requires every pair to match (containment)" do
+        expect(returned_ids).to eq([wallet_transaction_first.id])
+      end
+    end
+
+    context "when no transaction carries the pair" do
+      let(:filters) { {metadata: {"site_id" => "missing"}} }
+
+      it "returns nothing" do
+        expect(returned_ids).to be_empty
+      end
+    end
+
+    context "when the filter value is blank" do
+      let(:filters) { {metadata: {"site_id" => ""}} }
+
+      it "carries no constraint rather than matching empty values" do
+        expect(returned_ids.count).to eq(3)
+      end
+    end
+
+    context "when the stored value is a number" do
+      let(:wallet_transaction_first) { create(:wallet_transaction, wallet:, metadata: [{"key" => "count", "value" => 100}]) }
+      let(:filters) { {metadata: {"count" => "100"}} }
+
+      it "matches the numeric value against the string filter" do
+        expect(returned_ids).to eq([wallet_transaction_first.id])
+      end
     end
   end
 

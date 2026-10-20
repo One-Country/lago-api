@@ -4,11 +4,8 @@ require "rails_helper"
 
 RSpec.describe DataApi::UsagesService do
   let(:service) { described_class.new(organization, **params) }
-  let(:customer) { create(:customer, organization:) }
-  let(:organization) { create(:organization) }
   let(:body_response) { File.read("spec/fixtures/lago_data_api/usages.json") }
   let(:from_date) { Date.current - 60.days }
-
   let(:usage_json) do
     {
       "start_of_period_dt" => "2024-01-01",
@@ -20,6 +17,9 @@ RSpec.describe DataApi::UsagesService do
       "units" => 266
     }
   end
+  let(:customer) { create(:customer, organization:) }
+
+  let_it_be(:organization) { create(:organization) }
 
   describe "#call" do
     subject(:service_call) { service.call }
@@ -85,6 +85,29 @@ RSpec.describe DataApi::UsagesService do
           expect(service_call.usages.count).to eq(3)
           expect(service_call.usages.first).to eq(usage_json)
         end
+      end
+    end
+
+    context "when the data api returns a transient error before succeeding" do
+      let(:query) { {time_granularity: "daily", start_of_period_dt: Date.current - 30.days} }
+
+      before do
+        call_count = 0
+        stub_request(:get, "#{ENV["LAGO_DATA_API_URL"]}/usages/#{organization.id}/")
+          .with(query:)
+          .to_return do
+            call_count += 1
+            if call_count == 1
+              {status: 500, body: "transient error", headers: {}}
+            else
+              {status: 200, body: body_response, headers: {}}
+            end
+          end
+      end
+
+      it "retries and returns usages" do
+        expect(service_call).to be_success
+        expect(service_call.usages.count).to eq(3)
       end
     end
   end

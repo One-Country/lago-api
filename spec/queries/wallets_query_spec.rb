@@ -3,20 +3,25 @@
 require "rails_helper"
 
 RSpec.describe WalletsQuery do
+  before_all do
+    create_default(:customer)
+  end
+
   subject(:result) do
     described_class.call(organization:, pagination:, filters:)
   end
 
   let(:returned_ids) { result.wallets.pluck(:id) }
-  let(:organization) { create :organization }
-  let(:customer_1) { create :customer, organization:, external_id: "customer_1" }
-  let(:customer_2) { create :customer, organization:, external_id: "customer_2" }
   let(:wallet_1) { create :wallet, customer: customer_1 }
   let(:wallet_2) { create :wallet, customer: customer_1 }
   let(:wallet_3) { create :wallet, customer: customer_2 }
   let(:wallet_4) { create :wallet }
   let(:pagination) { {page: 1, limit: 10} }
   let(:filters) { nil }
+
+  let_it_be(:organization) { create :organization }
+  let_it_be(:customer_1) { create :customer, organization:, external_id: "customer_1" }
+  let_it_be(:customer_2) { create :customer, organization:, external_id: "customer_2" }
 
   before do
     wallet_1
@@ -105,6 +110,58 @@ RSpec.describe WalletsQuery do
         expect(result).not_to be_success
         expect(result.error).to be_a(BaseService::NotFoundFailure)
         expect(result.error.error_code).to eq("customer_not_found")
+      end
+    end
+  end
+
+  context "when filtering by billing_entity_ids" do
+    let_it_be(:billing_entity_eu) { create(:billing_entity, organization:, code: "EU") }
+    let_it_be(:billing_entity_us) { create(:billing_entity, organization:, code: "US") }
+
+    let_it_be(:customer_eu) { create(:customer, organization:, billing_entity: billing_entity_eu) }
+    let_it_be(:customer_us) { create(:customer, organization:, billing_entity: billing_entity_us) }
+
+    let(:wallet_eu_direct) { create(:wallet, customer: customer_us, billing_entity: billing_entity_eu) }
+    let(:wallet_eu_fallback) { create(:wallet, customer: customer_eu, billing_entity: nil) }
+    let(:wallet_us_direct) { create(:wallet, customer: customer_eu, billing_entity: billing_entity_us) }
+    let(:wallet_us_fallback) { create(:wallet, customer: customer_us, billing_entity: nil) }
+
+    let(:filters) { {billing_entity_ids: [billing_entity_eu.id]} }
+
+    before do
+      wallet_eu_direct
+      wallet_eu_fallback
+      wallet_us_direct
+      wallet_us_fallback
+    end
+
+    it "returns wallets directly stamped with the billing entity" do
+      expect(result).to be_success
+      expect(returned_ids).to include(wallet_eu_direct.id)
+    end
+
+    it "returns wallets with NULL billing_entity_id whose customer matches" do
+      expect(returned_ids).to include(wallet_eu_fallback.id)
+    end
+
+    it "excludes wallets stamped under a different billing entity" do
+      expect(returned_ids).not_to include(wallet_us_direct.id)
+    end
+
+    it "excludes wallets that fall back to a different billing entity via customer" do
+      expect(returned_ids).not_to include(wallet_us_fallback.id)
+    end
+
+    context "with multiple billing_entity_ids" do
+      let(:filters) { {billing_entity_ids: [billing_entity_eu.id, billing_entity_us.id]} }
+
+      it "returns wallets matching any of the provided ids" do
+        expect(returned_ids).to match_array([
+          wallet_eu_direct.id,
+          wallet_eu_fallback.id,
+          wallet_us_direct.id,
+          wallet_us_fallback.id
+        ])
       end
     end
   end

@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe PaymentProviders::Stripe::Webhooks::CustomerUpdatedService do
   subject(:webhook_service) { described_class.new(organization_id: organization.id, event:) }
 
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
 
   let(:event) { Stripe::Event.construct_from(JSON.parse(event_json)) }
   let(:provider_customer_id) { event.data.object.id }
@@ -30,10 +30,9 @@ RSpec.describe PaymentProviders::Stripe::Webhooks::CustomerUpdatedService do
         expect(result.stripe_customer.payment_method_id).to eq(payment_method_id)
       end
 
-      context "with multiple_payment_methods feature flag" do
+      context "when the customer has a payment method" do
         before do
           create(:payment_method, customer:, payment_provider_customer: stripe_customer, provider_method_id: "pm_updateMe")
-          organization.enable_feature_flag!(:multiple_payment_methods)
         end
 
         it "updates the associated customer payment method" do

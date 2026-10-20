@@ -3,8 +3,12 @@
 require "rails_helper"
 
 RSpec.describe Customers::RefreshWalletJob do
+  before_all do
+    create_default(:organization)
+  end
+
   describe "queue routing" do
-    let(:customer) { create(:customer) }
+    let_it_be(:customer) { create(:customer) }
 
     context "when the customer's organization is in the dedicated list" do
       before { stub_const("Utils::DedicatedWorkerConfig::ORGANIZATION_IDS", [customer.organization_id]) }
@@ -22,6 +26,10 @@ RSpec.describe Customers::RefreshWalletJob do
       end
     end
 
+    it_behaves_like "a configurable queue", "wallets", "SIDEKIQ_WALLETS", "low_priority" do
+      let(:arguments) { customer }
+    end
+
     context "when the dedicated list is empty" do
       before { stub_const("Utils::DedicatedWorkerConfig::ORGANIZATION_IDS", []) }
 
@@ -32,30 +40,48 @@ RSpec.describe Customers::RefreshWalletJob do
   end
 
   describe "#perform" do
-    subject { described_class.perform_now(customer) }
+    subject { described_class.perform_now(customer, wallet_ids:) }
 
-    let(:customer) { create(:customer, awaiting_wallet_refresh:) }
     let(:organization) { customer.organization }
-    let(:result) { BaseService::Result.new }
+    let(:result) { Customers::RefreshWalletsService::Result.new }
+    let(:wallet_ids) { nil }
 
     before do
       allow(Customers::RefreshWalletsService).to receive(:call).with(customer:).and_return(result)
     end
 
     context "when customer is not awaiting wallet refresh" do
-      let(:awaiting_wallet_refresh) { false }
+      let_it_be(:customer) { create(:customer, awaiting_wallet_refresh: false) }
 
       it "does not call the Customers::RefreshWalletsService service" do
         subject
         expect(Customers::RefreshWalletsService).not_to have_received(:call)
       end
+
+      context "when wallet_ids are provided" do
+        let(:wallet_ids) { create_list(:wallet, 2, customer:).map(&:id) }
+
+        it "still refreshes the whole customer" do
+          subject
+          expect(Customers::RefreshWalletsService).to have_received(:call).with(customer:)
+        end
+      end
     end
 
     context "when customer is awaiting wallet refresh" do
-      let(:awaiting_wallet_refresh) { true }
+      let_it_be(:customer) { create(:customer, awaiting_wallet_refresh: true) }
 
       context "when refresh customer's wallets succeeds" do
         it "calls the Customers::RefreshWalletsService service" do
+          subject
+          expect(Customers::RefreshWalletsService).to have_received(:call).with(customer:)
+        end
+      end
+
+      context "when wallet_ids are provided" do
+        let(:wallet_ids) { create_list(:wallet, 2, customer:).map(&:id) }
+
+        it "refreshes the whole customer" do
           subject
           expect(Customers::RefreshWalletsService).to have_received(:call).with(customer:)
         end
@@ -73,7 +99,7 @@ RSpec.describe Customers::RefreshWalletJob do
       end
 
       context "when refresh customer's wallets fails with a tax error" do
-        let(:result) { BaseService::Result.new.validation_failure!(errors: {tax_error: ["customerAddressCouldNotResolve"]}) }
+        let(:result) { Customers::RefreshWalletsService::Result.new.validation_failure!(errors: {tax_error: ["customerAddressCouldNotResolve"]}) }
 
         context "when the error is related to the customer's address" do
           it "creates a tax_error error_detail on the customer" do
@@ -109,7 +135,7 @@ RSpec.describe Customers::RefreshWalletJob do
         end
 
         context "when the tax error is an unknown failure" do
-          let(:result) { BaseService::Result.new.validation_failure!(errors: {tax_error: ["failure"]}) }
+          let(:result) { Customers::RefreshWalletsService::Result.new.validation_failure!(errors: {tax_error: ["failure"]}) }
 
           it "does not create an error_detail and re-raises the error" do
             expect { subject }.to raise_error(BaseService::ValidationFailure).and not_change { customer.error_details.count }
@@ -117,8 +143,45 @@ RSpec.describe Customers::RefreshWalletJob do
         end
       end
 
+      context "when refresh customer's wallets is throttled by the tax provider" do
+        let(:error) do
+          BaseService::TooManyProviderRequestsFailure.new(
+            BaseService::Result.new,
+            provider_name: :anrok,
+            error: StandardError.new("too many requests")
+          )
+        end
+
+        before do
+          allow(Customers::RefreshWalletsService).to receive(:call).with(customer:).and_raise(error)
+        end
+
+        it "retries a bounded number of times then gives up without raising" do
+          assert_performed_jobs(10, only: [described_class]) do
+            expect { described_class.perform_later(customer) }.not_to raise_error
+          end
+        end
+
+        context "with the uniqueness lock enforced" do
+          around do |example|
+            ActiveJob::Uniqueness.reset_manager!
+            example.run
+            described_class.unlock!(customer)
+            ActiveJob::Uniqueness.test_mode!
+          end
+
+          it "releases the uniqueness lock when giving up" do
+            assert_performed_jobs(10, only: [described_class]) do
+              described_class.perform_later(customer)
+            end
+
+            expect { described_class.perform_later(customer) }.to change { enqueued_jobs.count }.by(1) # rubocop:disable RSpec/ExpectChange
+          end
+        end
+      end
+
       context "when refresh customer's wallets fails with a non-tax error" do
-        let(:result) { BaseService::Result.new.validation_failure!(errors: {other_error: ["something"]}) }
+        let(:result) { Customers::RefreshWalletsService::Result.new.validation_failure!(errors: {other_error: ["something"]}) }
 
         it "re-raises the error" do
           expect { subject }.to raise_error(BaseService::ValidationFailure)

@@ -9,12 +9,12 @@ class Invoice < ApplicationRecord
   include PaperTrailTraceable
   include Sequenced
   include RansackUuidSearch
+  include HasPurchaseOrderNumber
 
   CREDIT_NOTES_MIN_VERSION = 2
   COUPON_BEFORE_VAT_VERSION = 3
   TAX_INVOICE_LABEL_COUNTRIES = %w[AU AE NZ ID SG].freeze
 
-  # before_save :ensure_organization_sequential_id, if: -> { organization.per_organization? && !self_billed }
   before_save :ensure_billing_entity_sequential_id, if: -> { billing_entity&.per_billing_entity? && !self_billed? }
   before_save :ensure_number
   before_save :set_finalized_at, if: -> { status_changed_to_finalized? }
@@ -23,17 +23,26 @@ class Invoice < ApplicationRecord
   belongs_to :organization
   belongs_to :billing_entity, optional: true
   belongs_to :payment_method, optional: true
+  belongs_to :x402_connection, class_name: "X402::Connection", optional: true
 
   has_many :fees
   has_many :credits
   has_many :wallet_transactions
   has_many :invoice_subscriptions
+  has_many :billing_segments
+  has_many :contracts, -> { distinct }, through: :billing_segments
   has_many :subscriptions, through: :invoice_subscriptions
   has_many :plans, through: :subscriptions
   has_many :metadata, class_name: "Metadata::InvoiceMetadata", dependent: :destroy
   has_many :credit_notes
+  has_many :invoice_connections, dependent: :destroy
+  has_one :payment_connection, -> { where(category: :payment) }, class_name: "InvoiceConnection"
+  has_one :tax_connection, -> { where(category: :tax) }, class_name: "InvoiceConnection"
+  has_one :accounting_connection, -> { where(category: :accounting) }, class_name: "InvoiceConnection"
+  has_one :crm_connection, -> { where(category: :crm) }, class_name: "InvoiceConnection"
   has_many :progressive_billing_credits, class_name: "Credit", foreign_key: :progressive_billing_invoice_id
   has_many :invoice_settlements, foreign_key: :target_invoice_id
+  has_many :x402_settlements, class_name: "X402::Settlement", inverse_of: :invoice
 
   has_many :applied_taxes, class_name: "Invoice::AppliedTax", dependent: :destroy
   has_many :taxes, through: :applied_taxes
@@ -44,6 +53,7 @@ class Invoice < ApplicationRecord
   has_many :payment_requests, through: :applied_payment_requests
   has_many :payments, as: :payable
   has_many :payment_receipts, through: :payments
+  has_many :customer_payments, -> { where.not(customer_id: nil).order(updated_at: :desc) }, class_name: "Payment", as: :payable
 
   has_many :applied_usage_thresholds
   has_many :usage_thresholds, through: :applied_usage_thresholds
@@ -94,7 +104,7 @@ class Invoice < ApplicationRecord
   }.freeze
 
   VISIBLE_STATUS = {draft: 0, finalized: 1, voided: 2, failed: 4, pending: 7}.freeze
-  INVISIBLE_STATUS = {generating: 3, open: 5, closed: 6}.freeze
+  INVISIBLE_STATUS = {generating: 3, open: 5, closed: 6, deleted: 8}.freeze
   MANUALLY_PAYABLE_INVOICE_STATUS = %i[finalized open].freeze
   STATUS = VISIBLE_STATUS.merge(INVISIBLE_STATUS).freeze
   GENERATED_INVOICE_STATUSES = %w[finalized closed].freeze
@@ -115,9 +125,14 @@ class Invoice < ApplicationRecord
     state :failed
     state :closed
     state :pending
+    state :deleted
 
     event :finalize do
       transitions from: :draft, to: :finalized
+    end
+
+    event :mark_as_deleted do
+      transitions from: :draft, to: :deleted
     end
 
     event :void do
@@ -125,8 +140,8 @@ class Invoice < ApplicationRecord
     end
   end
 
-  sequenced scope: ->(invoice) { invoice.customer.invoices },
-    lock_key: ->(invoice) { invoice.customer_id }
+  sequenced scope: ->(invoice) { invoice.customer.invoices.where(billing_entity_id: invoice.billing_entity_id) },
+    lock_key: ->(invoice) { "#{invoice.customer_id}-#{invoice.billing_entity_id}" }
 
   scope :visible, -> { where(status: VISIBLE_STATUS.keys) }
   scope :invisible, -> { where(status: INVISIBLE_STATUS.keys) }
@@ -148,6 +163,12 @@ class Invoice < ApplicationRecord
       .distinct
   }
 
+  scope :with_active_contracts, -> {
+    joins(:contracts)
+      .where(contracts: {status: Contract::BILLABLE_STATUSES})
+      .distinct
+  }
+
   scope :self_billed, -> { where(self_billed: true) }
   scope :non_self_billed, -> { where(self_billed: false) }
 
@@ -155,6 +176,7 @@ class Invoice < ApplicationRecord
   validates :timezone, timezone: true, allow_nil: true
   validates :total_amount_cents, numericality: {greater_than_or_equal_to: 0}
   validates :payment_dispute_lost_at, absence: true, unless: :payment_dispute_losable?
+  validate :validate_x402_connection_organization, if: :x402_connection_id_changed?
 
   def self.ransackable_attributes(_ = nil)
     %w[id number]
@@ -198,10 +220,62 @@ class Invoice < ApplicationRecord
     File.join(ENV["LAGO_API_URL"], blob_path)
   end
 
+  def web_url
+    return if invisible?
+
+    front_url = Rails.application.config.lago_front_url
+
+    URI.join(front_url, "/#{organization.slug}/customer/#{customer_id}/", "invoice/#{id}/overview").to_s
+  end
+
   def fee_total_amount_cents
-    amount_cents = fees.sum(:amount_cents)
-    taxes_amount_cents = fees.sum { |f| f.amount_cents * f.taxes_rate }.fdiv(100).round
-    amount_cents + taxes_amount_cents
+    fees_amount_cents + taxes_amount_cents
+  end
+
+  def provider_taxes?
+    applied_taxes.any?(&:provider_tax?)
+  end
+
+  def booked_tax_by_fee
+    # Native credit notes tax the credited amount at its rate and never read the per-row split.
+    if provider_taxes?
+      booked_tax = booked_tax_by_fee_tax
+      fees.index_with { |fee| booked_tax_units(fee).sum { |unit| booked_tax.fetch(unit) } }
+    else
+      split_booked_tax(taxes_amount_cents, ordered_fees_for_booked_tax)
+    end
+  end
+
+  # Native fee taxes round one by one while the invoice rounds once, and provider invoices booked
+  # before fee amounts were stored drift the same way: split what the invoice charged, first
+  # across its taxes, then within each tax across its fee rows, so a full credit matches both.
+  def booked_tax_by_fee_tax
+    ActiveRecord::Associations::Preloader.new(records: fees.select(&:persisted?), associations: :applied_taxes).call
+
+    units = ordered_fees_for_booked_tax.flat_map { |fee| booked_tax_units(fee) }
+    units_by_tax = booked_tax_units_by_invoice_tax(units)
+    tax_amounts = booked_tax_by_invoice_tax(units_by_tax)
+
+    booked = units_by_tax.values.zip(tax_amounts).each_with_object({}) do |(tax_units, amount_cents), split|
+      split.merge!(split_booked_tax(amount_cents, tax_units))
+    end
+    units.index_with { |unit| booked.fetch(unit) }
+  end
+
+  # NOTE: a fee tax resolves to the invoice tax with the same code and rate. When no invoice tax
+  #       has that rate (the fee and the invoice were taxed at different rates, e.g. the tax rate
+  #       changed in between), it falls back to the invoice tax carrying the same code, but only
+  #       if exactly one does: several invoice taxes sharing a code is the provider multi-rate
+  #       case, where the rate is the only thing telling them apart.
+  def applied_tax_for(fee_applied_tax)
+    invoice_taxes = applied_taxes.to_a
+    exact_match = invoice_taxes.find do |tax|
+      tax.tax_code == fee_applied_tax.tax_code && tax.tax_rate == fee_applied_tax.tax_rate
+    end
+    return exact_match if exact_match
+
+    code_matches = invoice_taxes.select { |tax| tax.tax_code == fee_applied_tax.tax_code }
+    code_matches.first if code_matches.one?
   end
 
   def charge_amount_cents
@@ -222,6 +296,12 @@ class Invoice < ApplicationRecord
 
   def sorted_subscriptions
     sorted_invoice_subscriptions.map(&:subscription)
+  end
+
+  def progressive_billing_last_applied_usage_threshold
+    return unless progressive_billing?
+
+    applied_usage_thresholds.order(created_at: :asc).last
   end
 
   def subscription_fees(subscription_id)
@@ -254,21 +334,34 @@ class Invoice < ApplicationRecord
 
     filters = {charge_id: fee.charge_id}
     if fee.charge_filter
-      result = ChargeFilters::MatchingAndIgnoredService.call(charge: fee.charge, filter: fee.charge_filter)
+      matching_result = Events::BillingPeriodFilters::MatchingAndIgnoredService.call(
+        target_filter: Events::BillingPeriodFilters::FilterTarget.from_charge(charge: fee.charge, filter: fee.charge_filter)
+      )
       filters[:charge_filter] = fee.charge_filter if fee.charge_filter
-      filters[:matching_filters] = result.matching_filters
-      filters[:ignored_filters] = result.ignored_filters
+      filters[:matching_filters] = matching_result.matching_filters
+      filters[:ignored_filters] = matching_result.ignored_filters
     end
 
-    service.new(
-      event_store_class: Events::Stores::StoreFactory.store_class(organization:),
+    boundaries = {
+      from_datetime: Time.zone.parse(fee.properties["charges_from_datetime"]),
+      to_datetime: Time.zone.parse(fee.properties["charges_to_datetime"]),
+      charges_duration: fee.properties["charges_duration"]
+    }
+
+    billing_context = Billing::Context.from(subscription: fee.subscription)
+    provider = Events::Stores::Provider.new(organization:, billing_context:)
+
+    metered_item = Fees::ChargeService::MeteredItem.from_charge(
       charge: fee.charge,
-      subscription: fee.subscription,
-      boundaries: {
-        from_datetime: Time.zone.parse(fee.properties["charges_from_datetime"]),
-        to_datetime: Time.zone.parse(fee.properties["charges_to_datetime"]),
-        charges_duration: fee.properties["charges_duration"]
-      },
+      boundaries: BillingPeriodBoundaries.from_fee(fee),
+      charge_filter: fee.charge_filter
+    )
+
+    service.new(
+      event_store: provider.store_for(metered_item:, boundaries:, filters:),
+      metered_item:,
+      billing_context:,
+      boundaries:,
       filters:
     ).breakdown.breakdown
   end
@@ -319,25 +412,7 @@ class Invoice < ApplicationRecord
   def available_to_credit_amount_cents
     return 0 if version_number < CREDIT_NOTES_MIN_VERSION || draft?
 
-    fees_total_creditable = fees.sum(&:creditable_amount_cents)
-    return 0 if fees_total_creditable.zero?
-
-    credit_adjustement = if version_number < Invoice::COUPON_BEFORE_VAT_VERSION
-      0
-    else
-      (coupons_amount_cents + progressive_billing_credit_amount_cents).fdiv(fees_amount_cents) * fees_total_creditable
-    end
-
-    vat = fees.sum do |fee|
-      # NOTE: Because coupons are applied before VAT,
-      #       we have to discribute the coupon adjustement at prorata of each fees
-      #       to compute the VAT
-      fee_rate = fee.creditable_amount_cents.fdiv(fees_total_creditable)
-      prorated_credit_amount = credit_adjustement * fee_rate
-      (fee.creditable_amount_cents - prorated_credit_amount) * (fee.taxes_rate || 0)
-    end.fdiv(100).round # BECAUSE OF THIS ROUND the returned value is not precise
-
-    fees_total_creditable - credit_adjustement + vat
+    [fees_available_to_credit_amount_cents, remaining_invoice_amount_cents].min
   end
 
   # amount cents onto which we can issue a credit note as credit
@@ -374,6 +449,15 @@ class Invoice < ApplicationRecord
 
     refundable_cents = [remaining_paid_cents, creditable_amount_cents].min
     refundable_cents.negative? ? 0 : refundable_cents
+  end
+
+  # An invoice settled through a payment request has its payment attached to the request, not to the invoice
+  def refundable_payment
+    payments.succeeded.order(created_at: :desc).first ||
+      Payment.succeeded
+        .where(payable: payment_requests.payment_succeeded)
+        .order(created_at: :desc)
+        .first
   end
 
   # Credit invoices have a single credit-type fee linked to the wallet transaction
@@ -474,7 +558,7 @@ class Invoice < ApplicationRecord
     return I18n.t("invoice.self_billed.document_name") if self_billed?
     return I18n.t("invoice.prepaid_credit_invoice") if credit?
 
-    if TAX_INVOICE_LABEL_COUNTRIES.include?(organization.country)
+    if TAX_INVOICE_LABEL_COUNTRIES.include?(billing_entity.country)
       return I18n.t("invoice.paid_tax_invoice") if advance_charges?
       return I18n.t("invoice.document_tax_name")
     end
@@ -494,6 +578,26 @@ class Invoice < ApplicationRecord
     MANUALLY_PAYABLE_INVOICE_STATUS.include?(status.to_sym)
   end
 
+  def x402_payment_eligible?
+    x402_payment_refusal.nil?
+  end
+
+  def x402_payment_refusal
+    if !finalized? || payment_succeeded? || !total_due_amount_cents.positive?
+      "invalid_invoice_status_or_payment_status"
+    elsif currency != X402::Settlements::SettleService::INVOICE_CURRENCY
+      "invoice_currency_not_supported"
+    elsif !customer.wallets.active.exists?(x402_enabled: true)
+      "wallet_not_x402_enabled"
+    elsif x402_payment_in_progress?
+      "invoice_payment_pending"
+    end
+  end
+
+  def x402_payment_url
+    File.join(ENV["LAGO_API_URL"], "x402/invoice_payments", x402_payment_token) if x402_payment_token.present?
+  end
+
   # A safeguard while we're populating the expected finalization date.
   # We can drop it once fill_expected_finalization_date has been run.
   def expected_finalization_date
@@ -501,6 +605,83 @@ class Invoice < ApplicationRecord
   end
 
   private
+
+  def fees_available_to_credit_amount_cents
+    booked_tax = booked_tax_by_fee
+
+    fees.sum { |fee| creditable_share(fee) * (fee.sub_total_excluding_taxes_amount_cents + booked_tax.fetch(fee)) }.round
+  end
+
+  def ordered_fees_for_booked_tax
+    fees.sort_by.with_index { |fee, index| [fee.created_at || Time.zone.at(0), fee.id.to_s, index] }
+  end
+
+  def booked_tax_units(fee)
+    rows = fee.applied_taxes.sort_by { |row| row.id.to_s }
+    rows.empty? ? [fee] : rows
+  end
+
+  # Fees without rows and rows matching no invoice tax share one group, weighted by their own
+  # cents, so the invoice tax is still spent in full.
+  def booked_tax_units_by_invoice_tax(units)
+    units
+      .group_by { |unit| applied_tax_for(unit) if unit.is_a?(Fee::AppliedTax) }
+      .sort_by.with_index { |(tax, _), index| tax ? [0, tax.tax_code, tax.tax_rate, index] : [1, index] }
+      .to_h
+  end
+
+  def booked_tax_by_invoice_tax(units_by_tax)
+    booked = units_by_tax.map do |tax, tax_units|
+      tax ? tax.amount_cents : tax_units.sum { |unit| booked_tax_cents(unit) }
+    end
+    exact = units_by_tax.values.map { |tax_units| tax_units.sum { |unit| exact_tax_cents(unit) } }
+
+    if booked.sum == taxes_amount_cents
+      booked
+    else
+      Integrations::Aggregator::Taxes::Allocation.call(taxes_amount_cents, booked_tax_weights(exact, booked))
+    end
+  end
+
+  def split_booked_tax(amount_cents, units)
+    booked = units.map { |unit| booked_tax_cents(unit) }
+    exact = units.map { |unit| exact_tax_cents(unit) }
+    split = if booked.sum == amount_cents
+      booked
+    else
+      Integrations::Aggregator::Taxes::Allocation.call(amount_cents, booked_tax_weights(exact, booked))
+    end
+
+    units.zip(split).to_h
+  end
+
+  # Taxes billed before exact amounts were stored carry none, so their rounded cents weight the
+  # split; when those are zero too, the cents still land on the first rows.
+  def booked_tax_weights(exact, booked)
+    if exact.sum.nonzero?
+      exact
+    elsif booked.sum.nonzero?
+      booked
+    else
+      Array.new(exact.size, 1)
+    end
+  end
+
+  def booked_tax_cents(unit)
+    unit.is_a?(Fee) ? unit.taxes_amount_cents : unit.amount_cents
+  end
+
+  def exact_tax_cents(unit)
+    unit.is_a?(Fee) ? unit.taxes_precise_amount_cents : unit.precise_amount_cents
+  end
+
+  def remaining_invoice_amount_cents
+    [sub_total_including_taxes_amount_cents - credit_notes.sum(:total_amount_cents), 0].max
+  end
+
+  def creditable_share(fee)
+    fee.amount_cents.zero? ? 0 : fee.creditable_amount_cents.fdiv(fee.amount_cents)
+  end
 
   # Returns the wallet associated with this credit invoice's prepaid credit fee.
   # Can be nil for historical invoices where the fee or wallet transaction is missing.
@@ -652,6 +833,19 @@ class Invoice < ApplicationRecord
 
     self.finalized_at ||= Time.current
   end
+
+  def validate_x402_connection_organization
+    connection = X402::Connection.with_discarded.find_by(id: x402_connection_id)
+
+    if connection && connection.organization_id != organization_id
+      errors.add(:x402_connection, :must_belong_to_same_organization)
+    end
+  end
+
+  def x402_payment_in_progress?
+    x402_settlements.where(payment_id: nil).where.not(status: :failed).exists? ||
+      (credit? && wallet_transactions.x402.exists?)
+  end
 end
 
 # == Schema Information
@@ -677,12 +871,16 @@ end
 #  payment_due_date                        :date
 #  payment_overdue                         :boolean          default(FALSE)
 #  payment_status                          :integer          default("pending"), not null
+#  payment_term                            :jsonb
+#  payment_term_source                     :string
 #  prepaid_credit_amount_cents             :bigint           default(0), not null
 #  prepaid_granted_credit_amount_cents     :bigint
 #  prepaid_purchased_credit_amount_cents   :bigint
 #  progressive_billing_credit_amount_cents :bigint           default(0), not null
+#  purchase_order_number                   :string
 #  ready_for_payment_processing            :boolean          default(TRUE), not null
 #  ready_to_be_refreshed                   :boolean          default(FALSE), not null
+#  search_terms                            :text
 #  self_billed                             :boolean          default(FALSE), not null
 #  skip_automatic_payment                  :boolean
 #  skip_charges                            :boolean          default(FALSE), not null
@@ -697,6 +895,7 @@ end
 #  total_paid_amount_cents                 :bigint           default(0), not null
 #  version_number                          :integer          default(4), not null
 #  voided_at                               :datetime
+#  x402_payment_token                      :string
 #  xml_file                                :string
 #  created_at                              :datetime         not null
 #  updated_at                              :datetime         not null
@@ -708,6 +907,7 @@ end
 #  payment_method_id                       :uuid
 #  sequential_id                           :integer
 #  voided_invoice_id                       :uuid
+#  x402_connection_id                      :uuid
 #
 # Indexes
 #
@@ -715,12 +915,18 @@ end
 #  idx_on_billing_entity_id_billing_entity_sequential__bd26b2e655  (billing_entity_id,billing_entity_sequential_id DESC)
 #  idx_on_organization_id_organization_sequential_id_2387146f54    (organization_id,organization_sequential_id DESC)
 #  index_invoices_by_cursor                                        (organization_id,issuing_date DESC,created_at DESC,id)
-#  index_invoices_on_customer_id_and_sequential_id                 (customer_id,sequential_id) UNIQUE
+#  index_invoices_on_customer_billing_entity_sequential            (customer_id,billing_entity_id,sequential_id) UNIQUE
 #  index_invoices_on_number                                        (number)
+#  index_invoices_on_organization_id_and_customer_id               (customer_id,organization_id)
+#  index_invoices_on_organization_id_lower_purchase_order_number   (organization_id, lower((purchase_order_number)::text))
+#  index_invoices_on_organization_id_number_gin_trgm_ops           (organization_id,number) USING gin
+#  index_invoices_on_organization_id_search_terms_gin_trgm_ops     (organization_id,search_terms) USING gin
 #  index_invoices_on_payment_due_date                              (payment_due_date) WHERE ((status = 1) AND (payment_status <> 1) AND (payment_overdue = false) AND (payment_dispute_lost_at IS NULL))
 #  index_invoices_on_payment_method_id                             (payment_method_id)
 #  index_invoices_on_ready_to_be_refreshed                         (ready_to_be_refreshed) WHERE (ready_to_be_refreshed = true)
 #  index_invoices_on_voided_invoice_id                             (voided_invoice_id)
+#  index_invoices_on_x402_connection_id                            (x402_connection_id) WHERE (x402_connection_id IS NOT NULL)
+#  index_invoices_on_x402_payment_token                            (x402_payment_token) UNIQUE WHERE (x402_payment_token IS NOT NULL)
 #
 # Foreign Keys
 #
@@ -728,4 +934,5 @@ end
 #  fk_rails_...  (customer_id => customers.id)
 #  fk_rails_...  (organization_id => organizations.id)
 #  fk_rails_...  (payment_method_id => payment_methods.id)
+#  fk_rails_...  (x402_connection_id => x402_connections.id)
 #

@@ -3,6 +3,8 @@
 module Invoices
   module ProviderTaxes
     class PullTaxesAndApplyService < BaseService
+      Result = BaseResult[:invoice]
+
       def initialize(invoice:)
         @invoice = invoice
 
@@ -16,7 +18,7 @@ module Invoices
         return result unless invoice.tax_pending?
 
         invoice.error_details.tax_error.discard_all # rubocop:disable Lago/DiscardAll
-        taxes_result = if invoice.draft?
+        taxes_result = if invoice.draft? || invoice.subscription_gated?
           Integrations::Aggregator::Taxes::Invoices::CreateDraftService.call(invoice:, fees: invoice.fees)
         else
           Integrations::Aggregator::Taxes::Invoices::CreateService.call(invoice:, fees: invoice.fees)

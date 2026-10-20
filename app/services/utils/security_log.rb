@@ -66,8 +66,9 @@ module Utils
       return false unless self.class.available?
       return false unless @skip_organization_check || @organization.security_logs_enabled?
 
-      Karafka.producer.produce_async(
+      KafkaProducer.produce_async(
         topic: self.class.topic,
+        invalid_message_level: :warning,
         key: @key,
         payload: {
           organization_id: @organization.id,
@@ -82,8 +83,6 @@ module Utils
           created_at: @current_time
         }.to_json
       )
-
-      true
     end
 
     private

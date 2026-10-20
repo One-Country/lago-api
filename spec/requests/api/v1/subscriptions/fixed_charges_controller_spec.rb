@@ -4,14 +4,15 @@ require "rails_helper"
 
 RSpec.describe Api::V1::Subscriptions::FixedChargesController do
   let(:external_id) { "sub+1" }
-  let(:external_id_query_param) { external_id }
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:) }
-  let(:plan) { create(:plan, organization:) }
-  let(:add_on) { create(:add_on, organization:) }
   let(:subscription) { create(:subscription, external_id:, customer:, plan:) }
   let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:) }
   let(:deleted_fixed_charge) { create(:fixed_charge, :deleted, plan:, organization:) }
+  let(:external_id_query_param) { external_id }
+
+  let_it_be(:organization, refind: true) { create_default(:organization) }
+  let_it_be(:customer) { create_default(:customer, organization:) }
+  let_it_be(:plan, refind: true) { create_default(:plan, organization:) }
+  let_it_be(:add_on, refind: true) { create_default(:add_on, organization:) }
 
   before do
     subscription
@@ -63,6 +64,21 @@ RSpec.describe Api::V1::Subscriptions::FixedChargesController do
       it do
         subject
         expect(json[:fixed_charges]).to be_empty
+      end
+    end
+
+    context "when a per-subscription units override exists" do
+      let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, units: 10) }
+
+      before do
+        create(:subscription_fixed_charge_units_override, subscription:, fixed_charge:, organization:, units: 42)
+      end
+
+      it "returns the overridden units" do
+        subject
+
+        expect(response).to have_http_status(:success)
+        expect(json[:fixed_charges].first[:units]).to eq("42.0")
       end
     end
 
@@ -142,6 +158,21 @@ RSpec.describe Api::V1::Subscriptions::FixedChargesController do
         expect(json[:fixed_charge][:lago_parent_id]).to eq(fixed_charge.id)
       end
     end
+
+    context "when a per-subscription units override exists" do
+      let(:fixed_charge) { create(:fixed_charge, plan:, organization:, add_on:, units: 10) }
+
+      before do
+        create(:subscription_fixed_charge_units_override, subscription:, fixed_charge:, organization:, units: 99)
+      end
+
+      it "returns the overridden units" do
+        subject
+
+        expect(response).to have_http_status(:success)
+        expect(json[:fixed_charge][:units]).to eq("99.0")
+      end
+    end
   end
 
   describe "PUT /api/v1/subscriptions/:external_id/fixed_charges/:code" do
@@ -193,8 +224,21 @@ RSpec.describe Api::V1::Subscriptions::FixedChargesController do
         end
       end
 
+      context "when subscription is incomplete" do
+        subject { put_with_token(organization, "/api/v1/subscriptions/#{external_id_query_param}/fixed_charges/#{fixed_charge.code}?status=incomplete", {fixed_charge: update_params}) }
+
+        let(:subscription) { create(:subscription, :incomplete, external_id:, customer:, plan:) }
+
+        it "returns a validation error" do
+          subject
+
+          expect(response).to have_http_status(:unprocessable_content)
+          expect(json[:error_details]).to eq({base: %w[subscription_incomplete]})
+        end
+      end
+
       context "when subscription already has plan override" do
-        let(:overridden_plan) { create(:plan, organization:, parent: plan) }
+        let_it_be(:overridden_plan, refind: true) { create_default(:plan, organization:, parent: plan) }
         let(:subscription) { create(:subscription, customer:, plan: overridden_plan, external_id:) }
         let(:overridden_fixed_charge) { create(:fixed_charge, plan: overridden_plan, organization:, add_on:, parent: fixed_charge, code: fixed_charge.code) }
 

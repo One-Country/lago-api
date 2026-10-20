@@ -4,18 +4,20 @@ module Invoices
   module Payments
     class FlutterwaveService < BaseService
       include Customers::PaymentProviderFinder
+      include TypedResults
 
       PROVIDER_NAME = "Flutterwave"
 
-      def initialize(invoice = nil)
-        @invoice = invoice
+      RESULTS = {
+        update_payment_status: BaseResult[:payment, :invoice],
+        generate_payment_url: BaseResult[:payment_url]
+      }.freeze
 
-        super
-      end
+      private
 
-      def update_payment_status(organization_id:, status:, flutterwave_payment:)
+      def update_payment_status(organization_id:, status:, flutterwave_payment:, amount_cents: nil)
         payment = if flutterwave_payment.metadata[:payment_type] == "one-time"
-          create_payment(flutterwave_payment)
+          create_payment(flutterwave_payment, amount_cents:)
         else
           Payment.find_by(provider_payment_id: flutterwave_payment.id)
         end
@@ -42,14 +44,13 @@ module Invoices
         result.fail_with_error!(e)
       end
 
-      def generate_payment_url(payment_intent)
+      def generate_payment_url(invoice, payment_intent)
+        @invoice = invoice
         result.payment_url = payment_url
         result
       rescue LagoHttpClient::HttpError => e
         result.third_party_failure!(third_party: PROVIDER_NAME, error_code: e.error_code, error_message: e.error_body)
       end
-
-      private
 
       attr_accessor :invoice
 
@@ -129,7 +130,7 @@ module Invoices
         @http_client ||= LagoHttpClient::Client.new("#{flutterwave_payment_provider.api_url}/payments")
       end
 
-      def create_payment(flutterwave_payment)
+      def create_payment(flutterwave_payment, amount_cents: nil)
         @invoice = Invoice.find_by(id: flutterwave_payment.metadata[:lago_invoice_id])
 
         increment_payment_attempts
@@ -140,7 +141,7 @@ module Invoices
           customer:,
           payment_provider_id: flutterwave_payment_provider.id,
           payment_provider_customer_id: customer.flutterwave_customer.id,
-          amount_cents: @invoice.total_due_amount_cents,
+          amount_cents: amount_cents || @invoice.total_due_amount_cents,
           amount_currency: @invoice.currency,
           provider_payment_id: flutterwave_payment.id
         )

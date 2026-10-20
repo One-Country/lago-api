@@ -5,8 +5,8 @@ require "rails_helper"
 RSpec.describe Entitlement::PlanEntitlementsUpdateService do
   subject(:result) { described_class.call(organization:, plan:, entitlements_params:, partial: false) }
 
-  let(:organization) { create(:organization) }
-  let(:plan) { create(:plan, organization:) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:plan) { create(:plan, organization:) }
   let(:feature) { create(:feature, organization:, code: "seats") }
   let(:privilege) { create(:privilege, organization:, feature:, code: "max", value_type: "integer") }
   let(:entitlements_params) do
@@ -47,6 +47,19 @@ RSpec.describe Entitlement::PlanEntitlementsUpdateService do
     it "produces an activity log" do
       subject
       expect(Utils::ActivityLog).to have_produced("plan.updated").after_commit.with(plan)
+    end
+
+    context "when send_webhook is false" do
+      subject(:result) { described_class.call(organization:, plan:, entitlements_params:, partial: false, send_webhook: false) }
+
+      it "does not send the `plan.updated` webhook" do
+        expect { subject }.not_to have_enqueued_job(SendWebhookJob).with("plan.updated", plan)
+      end
+
+      it "does not produce an activity log" do
+        subject
+        expect(Utils::ActivityLog).not_to have_received(:produce)
+      end
     end
 
     it "creates the entitlement with correct values" do
@@ -303,7 +316,13 @@ RSpec.describe Entitlement::PlanEntitlementsUpdateService do
           entitlement_value2
           entitlement_value3
 
-          allow(SendWebhookJob).to receive(:perform_after_commit)
+          # NOTE: SendWebhookJob.perform_later checks organization.webhook_endpoints,
+          #       which Bullet flags as an N+1. It is not part of this test.
+          Bullet.add_safelist(type: :n_plus_one_query, class_name: "Organization", association: :webhook_endpoints)
+        end
+
+        after do
+          Bullet.delete_safelist(type: :n_plus_one_query, class_name: "Organization", association: :webhook_endpoints)
         end
 
         it "does not trigger N+1 queries when updating multiple features and privileges" do

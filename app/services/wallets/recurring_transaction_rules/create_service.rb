@@ -15,6 +15,7 @@ module Wallets
       def call
         return unless License.premium?
         return result unless valid_payment_method?
+        return result unless valid_connections?
 
         if method == "fixed" && rule_params[:paid_credits].nil? && rule_params[:granted_credits].nil?
           paid_credits = wallet_params[:paid_credits]
@@ -33,11 +34,16 @@ module Wallets
           target_ongoing_balance: rule_params[:target_ongoing_balance],
           trigger: rule_params[:trigger].to_s,
           transaction_metadata: rule_params[:transaction_metadata] || [],
-          transaction_name: rule_params[:transaction_name].presence
+          transaction_name: rule_params[:transaction_name].presence,
+          purchase_order_number: rule_params[:purchase_order_number]
         }
 
         if rule_params.key? :ignore_paid_top_up_limits
           attributes[:ignore_paid_top_up_limits] = ActiveModel::Type::Boolean.new.cast(rule_params[:ignore_paid_top_up_limits])
+        end
+
+        attributes[:grants_target_top_up] = if method == "target"
+          ActiveModel::Type::Boolean.new.cast(rule_params[:grants_target_top_up]) == true
         end
 
         if rule_params.key?(:payment_method)
@@ -62,10 +68,16 @@ module Wallets
           InvoiceCustomSections::AttachToResourceService.call(resource: rule, params: rule_params)
         end
 
+        if rule_params[:connections].present?
+          BillingObjectConnections::AttachToResourceService.call!(resource: rule, params: rule_params)
+        end
+
         result.recurring_transaction_rule = rule
         result
-      rescue BaseService::FailedResult
-        result
+      rescue ActiveRecord::RecordInvalid => e
+        result.record_validation_failure!(record: e.record)
+      rescue BaseService::FailedResult => e
+        e.result
       end
 
       private
@@ -100,6 +112,15 @@ module Wallets
         result.payment_method = payment_method
 
         PaymentMethods::ValidateService.new(result, **rule_params).valid?
+      end
+
+      def valid_connections?
+        validator = BillingObjectConnections::ValidateService.new(result, **rule_params)
+        return true if validator.valid?
+
+        result.single_validation_failure!(field: :connections, error_code: validator.error_codes.first)
+
+        false
       end
 
       def payment_method

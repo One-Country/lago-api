@@ -3,11 +3,11 @@
 require "rails_helper"
 
 RSpec.describe Invoices::ProviderTaxes::PullTaxesAndApplyJob do
-  let(:organization) { create(:organization) }
+  let_it_be(:organization) { create(:organization) }
+  let_it_be(:customer) { create(:customer, organization:) }
   let(:invoice) { create(:invoice, customer:) }
-  let(:customer) { create(:customer, organization:) }
 
-  let(:result) { BaseService::Result.new }
+  let(:result) { Invoices::ProviderTaxes::PullTaxesAndApplyService::Result.new }
 
   before do
     allow(Invoices::ProviderTaxes::PullTaxesAndApplyService).to receive(:call)
@@ -29,8 +29,9 @@ RSpec.describe Invoices::ProviderTaxes::PullTaxesAndApplyJob do
 
   describe "retry_on" do
     [
-      [Customers::FailedToAcquireLock.new("customer-1-prepaid_credit"), 25],
+      [BaseLockService::FailedToAcquireLock.new("customer-1-prepaid_credit"), 25],
       [ActiveRecord::StaleObjectError.new("Attempted to update a stale object: Wallet."), 25],
+      [Sequenced::SequenceError.new("Unable to acquire lock on the database"), 15],
       [BaseService::ThrottlingError.new, 25],
       [LagoHttpClient::HttpError.new(401, "body", "uri"), 6],
       [OpenSSL::SSL::SSLError.new("OpenSSL::SSL::SSLError"), 6],

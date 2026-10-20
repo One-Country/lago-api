@@ -9,6 +9,7 @@ module V1
         lago_invoice_id: model.invoice_id,
         lago_credit_note_id: model.credit_note_id,
         lago_voided_invoice_id: model.voided_invoice_id,
+        billing_entity_code: billing_entity_code,
         status: model.status,
         source: model.source,
         transaction_status: model.transaction_status,
@@ -18,6 +19,7 @@ module V1
         remaining_amount_cents: model.remaining_amount_cents,
         remaining_credit_amount: model.remaining_credit_amount,
         priority: model.priority,
+        purchase_order_number: model.resolved_purchase_order_number,
         settled_at: model.settled_at&.iso8601,
         failed_at: model.failed_at&.iso8601,
         created_at: model.created_at.iso8601,
@@ -34,6 +36,10 @@ module V1
     end
 
     private
+
+    def billing_entity_code
+      (model.billing_entity || model.wallet.billing_entity)&.code
+    end
 
     def wallet
       {

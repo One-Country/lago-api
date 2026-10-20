@@ -4,7 +4,7 @@ require "rails_helper"
 
 RSpec.describe Invoices::CreatePayInAdvanceChargeService do
   subject(:invoice_service) do
-    described_class.new(charge:, event:, timestamp: timestamp.to_i)
+    described_class.new(metered_item:, billing_context:, timestamp: timestamp.to_i)
   end
 
   let(:timestamp) { Time.zone.now.beginning_of_month }
@@ -14,6 +14,7 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
   let(:customer) { create(:customer, organization:) }
   let(:plan) { create(:plan, organization:) }
   let(:subscription) { create(:subscription, customer:, plan:) }
+  let(:billing_context) { Billing::Context.from(subscription:) }
   let(:charge) { create(:standard_charge, :pay_in_advance, billable_metric:, plan:) }
   let(:charge_filter) { nil }
 
@@ -30,6 +31,21 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
     )
   end
 
+  let(:metered_item) do
+    Fees::ChargeService::MeteredItem.from_charge(
+      charge:,
+      boundaries: BillingPeriodBoundaries.new(
+        from_datetime: event.timestamp,
+        to_datetime: event.timestamp,
+        charges_from_datetime: event.timestamp,
+        charges_to_datetime: event.timestamp,
+        charges_duration: 0,
+        timestamp: event.timestamp
+      ),
+      event: Events::CommonFactory.new_instance(source: event)
+    )
+  end
+
   before do
     create(:tax, :applied_to_billing_entity, organization:)
     billing_entity.update!(email_settings:)
@@ -37,7 +53,7 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
 
   describe "#call" do
     let(:aggregation_result) do
-      BaseService::Result.new.tap do |result|
+      BillableMetrics::Aggregations::BaseService::Result.new.tap do |result|
         result.aggregation = 9
         result.count = 4
         result.options = {}
@@ -45,7 +61,7 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
     end
 
     let(:charge_result) do
-      BaseService::Result.new.tap do |result|
+      Charges::ApplyPayInAdvanceChargeModelService::Result.new.tap do |result|
         result.amount = 10
         result.precise_amount = 10.0
         result.unit_amount = 0.01111111111
@@ -57,11 +73,14 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
 
     before do
       allow(Charges::PayInAdvanceAggregationService).to receive(:call)
-        .with(charge:, boundaries: BillingPeriodBoundaries, properties: Hash, event:, charge_filter:)
+        .with(
+          metered_item: have_attributes(charge:, event:),
+          billing_context: instance_of(Billing::Context)
+        )
         .and_return(aggregation_result)
 
       allow(Charges::ApplyPayInAdvanceChargeModelService).to receive(:call)
-        .with(charge:, aggregation_result:, properties: Hash)
+        .with(metered_item: have_attributes(charge:, event:), aggregation_result:, properties: Hash)
         .and_return(charge_result)
 
       allow(Invoices::TransitionToFinalStatusService).to receive(:call).and_call_original
@@ -115,8 +134,143 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
       expect(result.invoice).to be_finalized
     end
 
+    it "returns a validation failure when the charge fee already exists" do
+      invoice_service.call
+
+      retry_result = invoice_service.call
+
+      expect(retry_result.error.messages).to eq(pay_in_advance_event_transaction_id: ["pay_in_advance_fee_already_exists"])
+      expect(Fee.where(pay_in_advance_event_transaction_id: event.transaction_id).count).to eq(1)
+    end
+
     it "creates InvoiceSubscription object" do
       expect { invoice_service.call.invoice }.to change(InvoiceSubscription, :count).by(1)
+    end
+
+    context "when the metered item is backed by a billing segment" do
+      let(:contract) { create(:contract, organization:, customer:, billing_entity:, purchase_order_number: "PO-CONTRACT-123") }
+      let(:product) { create(:product, :metered, organization:, billable_metric:) }
+      let(:rate_card) { create(:rate_card, :advance, organization:, product:, display_on_invoice: false) }
+      let(:contract_rate_card) { create(:contract_rate_card, organization:, contract:, rate_card:) }
+      let(:billing_segment) do
+        create(
+          :billing_segment,
+          organization:,
+          customer:,
+          contract:,
+          contract_rate_card:,
+          currency: "EUR",
+          rate_properties: {"amount" => "10"}
+        )
+      end
+      let(:event) do
+        source = create(
+          :event,
+          external_subscription_id: contract.external_id,
+          external_customer_id: customer.external_id,
+          organization_id: organization.id,
+          code: billable_metric.code
+        )
+        Events::CommonFactory.new_instance(source:)
+      end
+      let(:metered_item) { Fees::ChargeService::MeteredItem.from_billing_segment(billing_segment:, event:) }
+      let(:billing_context) { Billing::Context.from(contract:) }
+
+      before do
+        allow(Charges::PayInAdvanceAggregationService).to receive(:call)
+          .with(metered_item:, billing_context: an_object_having_attributes(contract:))
+          .and_return(aggregation_result)
+        allow(Charges::ApplyPayInAdvanceChargeModelService).to receive(:call)
+          .with(metered_item:, aggregation_result:, properties: Hash)
+          .and_return(charge_result)
+      end
+
+      it "creates an invoice from the contract billing context" do
+        result = invoice_service.call
+
+        expect(result).to be_success
+        expect(result.invoice).to have_attributes(
+          customer:,
+          billing_entity:,
+          currency: "EUR",
+          purchase_order_number: "PO-CONTRACT-123"
+        )
+        expect(result.invoice.invoice_subscriptions).to be_empty
+        expect(result.invoice.fees.sole).to have_attributes(subscription: nil, charge: nil, fee_type: "product")
+      end
+
+      context "when the contract selects an invoice custom section" do
+        let(:section) { create(:invoice_custom_section, organization:) }
+
+        before do
+          create(:contract_applied_invoice_custom_section, organization:, contract:, invoice_custom_section: section)
+        end
+
+        it "copies the contract's section onto the invoice" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.applied_invoice_custom_sections.pluck(:code)).to eq([section.code])
+        end
+      end
+
+      context "when the contract skips invoice custom sections" do
+        let(:contract) do
+          create(:contract, organization:, customer:, billing_entity:, skip_invoice_custom_sections: true)
+        end
+        let(:section) { create(:invoice_custom_section, organization:) }
+
+        before do
+          create(:billing_entity_applied_invoice_custom_section, organization:, billing_entity:, invoice_custom_section: section)
+        end
+
+        it "does not fall back to the billing entity's sections" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.applied_invoice_custom_sections).to be_empty
+        end
+      end
+
+      it "does not persist another invoice when the same product event is retried" do
+        invoice_service.call
+        result = nil
+
+        expect { result = invoice_service.call }.not_to change(Invoice, :count)
+        expect(result).not_to be_success
+        expect(result.error.messages).to eq(pay_in_advance_event_transaction_id: ["pay_in_advance_fee_already_exists"])
+        expect(Fee.where(pay_in_advance_event_transaction_id: event.transaction_id).count).to eq(1)
+      end
+    end
+
+    context "with billing entity resolution" do
+      it "stamps the customer's billing_entity when subscription has none" do
+        invoice = invoice_service.call.invoice
+
+        expect(invoice.billing_entity).to eq(customer.billing_entity)
+      end
+
+      context "when subscription has its own billing_entity" do
+        let(:other_billing_entity) { create(:billing_entity, organization:) }
+
+        before { subscription.update!(billing_entity: other_billing_entity) }
+
+        it "stamps the subscription's billing_entity on the invoice" do
+          invoice = invoice_service.call.invoice
+
+          expect(invoice.billing_entity).to eq(other_billing_entity)
+        end
+      end
+    end
+
+    context "when the event subscription has a purchase order number" do
+      let(:subscription) do
+        create(:subscription, customer:, plan:, purchase_order_number: "PO-SUB-123")
+      end
+
+      it "copies it to the invoice" do
+        invoice = invoice_service.call.invoice
+
+        expect(invoice.purchase_order_number).to eq("PO-SUB-123")
+      end
     end
 
     it "calls SegmentTrackJob" do
@@ -154,9 +308,37 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
     end
 
     it "produces an activity log" do
-      invoice = described_class.call(charge:, event:, timestamp: timestamp.to_i).invoice
+      invoice = described_class.call(metered_item:, billing_context:, timestamp: timestamp.to_i).invoice
 
       expect(Utils::ActivityLog).to have_produced("invoice.created").with(invoice)
+    end
+
+    context "when the subscription has its own billing entity (different from the customer's)" do
+      let(:customer_billing_entity) { create(:billing_entity, organization:, code: "acme_us") }
+      let(:subscription_billing_entity) { create(:billing_entity, organization:, code: "acme_eu") }
+      let(:customer) { create(:customer, organization:, billing_entity: customer_billing_entity) }
+      let(:subscription) { create(:subscription, customer:, plan:, billing_entity: subscription_billing_entity) }
+
+      it "stamps the invoice with the subscription's billing entity, not the customer's" do
+        result = invoice_service.call
+
+        expect(result).to be_success
+        expect(result.invoice.billing_entity_id).to eq(subscription_billing_entity.id)
+        expect(result.invoice.billing_entity_id).not_to eq(customer_billing_entity.id)
+      end
+    end
+
+    context "when the subscription has no explicit billing entity" do
+      let(:customer_billing_entity) { create(:billing_entity, organization:, code: "acme_us") }
+      let(:customer) { create(:customer, organization:, billing_entity: customer_billing_entity) }
+      let(:subscription) { create(:subscription, customer:, plan:, billing_entity: nil) }
+
+      it "falls back to the customer's billing entity" do
+        result = invoice_service.call
+
+        expect(result).to be_success
+        expect(result.invoice.billing_entity_id).to eq(customer_billing_entity.id)
+      end
     end
 
     it "enqueues GenerateDocumentsJob with email false" do
@@ -242,6 +424,22 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
         expect(SendWebhookJob).to have_been_enqueued.with("fee.created", anything)
         expect(SendWebhookJob).not_to have_been_enqueued.with("invoice.created", anything)
       end
+
+      context "with custom sections applied at the billing entity level" do
+        let(:custom_section) { create(:invoice_custom_section, organization:) }
+
+        before do
+          create(:billing_entity_applied_invoice_custom_section, organization:, billing_entity:, invoice_custom_section: custom_section)
+        end
+
+        it "applies the custom sections even though tax resolution is deferred" do
+          result = invoice_service.call
+
+          expect(result).to be_success
+          expect(result.invoice.status).to eq("pending")
+          expect(result.invoice.applied_invoice_custom_sections.pluck(:code)).to eq([custom_section.code])
+        end
+      end
     end
 
     context "with grace period" do
@@ -293,6 +491,13 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
       let(:service_call) { invoice_service.call }
     end
 
+    it_behaves_like "applies invoice_custom_sections from resource" do
+      let(:service_call) { invoice_service.call }
+      let(:resource_with_custom_section) { subscription }
+      let(:applied_section_factory) { :subscription_applied_invoice_custom_section }
+      let(:resource_association_key) { :subscription }
+    end
+
     context "when an error occurs" do
       context "with a stale object error" do
         before do
@@ -310,9 +515,9 @@ RSpec.describe Invoices::CreatePayInAdvanceChargeService do
       context "with a failed to acquire lock error" do
         it "propagates the error" do
           allow_any_instance_of(Credits::AppliedPrepaidCreditsService) # rubocop:disable RSpec/AnyInstance
-            .to receive(:call).and_raise(Customers::FailedToAcquireLock)
+            .to receive(:call).and_raise(BaseLockService::FailedToAcquireLock)
 
-          expect { invoice_service.call }.to raise_error(Customers::FailedToAcquireLock)
+          expect { invoice_service.call }.to raise_error(BaseLockService::FailedToAcquireLock)
         end
       end
 

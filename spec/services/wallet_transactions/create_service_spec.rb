@@ -3,9 +3,9 @@
 require "rails_helper"
 
 RSpec.describe WalletTransactions::CreateService do
-  let(:organization) { create(:organization) }
-  let(:customer) { create(:customer, organization:, currency:) }
-  let(:currency) { "EUR" }
+  let_it_be(:organization) { create_default(:organization) }
+  let_it_be(:currency) { "EUR" }
+  let_it_be(:customer) { create_default(:customer, organization:, currency:) }
   let(:wallet_credit) { WalletCredit.new(wallet:, credit_amount:) }
 
   let(:wallet) do
@@ -47,6 +47,7 @@ RSpec.describe WalletTransactions::CreateService do
           .to be_a(WalletTransaction)
           .and be_persisted
           .and have_attributes(
+            billable_metric_amounts: nil,
             invoice_requires_successful_payment: false,
             metadata: [],
             priority: 50,
@@ -80,7 +81,9 @@ RSpec.describe WalletTransactions::CreateService do
           invoice_id: invoice.id,
           priority: 25,
           name: "Custom Transaction Name",
-          payment_method: payment_method_params
+          purchase_order_number: "PO-123",
+          payment_method: payment_method_params,
+          billable_metric_amounts: {"00000000-0000-4000-8000-000000000002" => {"00000000-0000-4000-8000-000000000001" => 1000}}
         }
       end
 
@@ -103,8 +106,10 @@ RSpec.describe WalletTransactions::CreateService do
         expect(wallet_transaction.credit_amount).to eq(credit_amount)
         expect(wallet_transaction.priority).to eq 25
         expect(wallet_transaction.name).to eq("Custom Transaction Name")
+        expect(wallet_transaction.purchase_order_number).to eq("PO-123")
         expect(wallet_transaction.payment_method_id).to eq(payment_method.id)
         expect(wallet_transaction.payment_method_type).to eq("provider")
+        expect(wallet_transaction.billable_metric_amounts).to eq({"00000000-0000-4000-8000-000000000002" => {"00000000-0000-4000-8000-000000000001" => 1000}})
       end
     end
 
@@ -179,6 +184,54 @@ RSpec.describe WalletTransactions::CreateService do
         wallet_transaction = result.wallet_transaction
 
         expect(wallet_transaction.remaining_amount_cents).to be_nil
+      end
+    end
+
+    context "with billing entity snapshotting" do
+      let(:credit_amount) { 100 }
+      let(:explicit_billing_entity) { create(:billing_entity, organization:) }
+      let(:wallet) { create(:wallet, customer:, currency:, billing_entity: wallet_billing_entity) }
+      let(:transaction_params) do
+        {
+          status: :pending,
+          transaction_type: :inbound,
+          transaction_status: :purchased
+        }
+      end
+
+      let_it_be(:wallet_billing_entity) { create(:billing_entity, organization:) }
+
+      it "snapshots the wallet's effective billing entity on the transaction" do
+        wallet_transaction = result.wallet_transaction
+
+        expect(wallet_transaction.billing_entity_id).to eq(wallet_billing_entity.id)
+      end
+
+      context "when wallet has no explicit billing entity" do
+        let(:wallet) { create(:wallet, customer:, currency:, billing_entity: nil) }
+
+        it "snapshots the customer's billing entity via the wallet fallback" do
+          wallet_transaction = result.wallet_transaction
+
+          expect(wallet_transaction.billing_entity_id).to eq(customer.billing_entity_id)
+        end
+      end
+
+      context "when an explicit billing_entity_id is passed" do
+        let(:transaction_params) do
+          {
+            status: :settled,
+            transaction_type: :outbound,
+            transaction_status: :voided,
+            billing_entity_id: explicit_billing_entity.id
+          }
+        end
+
+        it "uses the explicit value over the wallet's entity" do
+          wallet_transaction = result.wallet_transaction
+
+          expect(wallet_transaction.billing_entity_id).to eq(explicit_billing_entity.id)
+        end
       end
     end
   end

@@ -4,18 +4,16 @@ require "rails_helper"
 
 RSpec.describe CreditNotes::GenerateXmlService, type: :service do
   let(:context) { "graphql" }
-
-  let(:organization) { create(:organization, name: "LAGO") }
-  let(:billing_entity) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
-  let(:einvoicing) { true }
-
   let(:credit_note) { create(:credit_note, status:, billing_entity:) }
   let(:status) { :finalized }
-
   let(:xml_service) { EInvoices::CreditNotes::Ubl::CreateService }
   let(:fake_xml) { "<xml>content</xml>" }
-  let(:create_xml_result) { BaseService::Result.new.tap { |result| result.xml = fake_xml } }
+  let(:create_xml_result) { EInvoices::CreditNotes::Ubl::CreateService::Result.new.tap { |result| result.xml = fake_xml } }
   let(:blank_xml_path) { Rails.root.join("spec/fixtures/blank.xml") }
+
+  let_it_be(:organization, refind: true) { create(:organization, name: "LAGO") }
+  let_it_be(:einvoicing) { true }
+  let_it_be(:billing_entity, refind: true) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
 
   before do
     credit_note
@@ -78,7 +76,7 @@ RSpec.describe CreditNotes::GenerateXmlService, type: :service do
         it "results in error" do
           result = described_class.call(credit_note:, context:)
 
-          expect(result.success).to be_falsey
+          expect(result).not_to be_success
           expect(result.error.error_code).to eq("credit_note_not_found")
         end
       end
@@ -89,7 +87,7 @@ RSpec.describe CreditNotes::GenerateXmlService, type: :service do
         it "results in error" do
           result = described_class.call(credit_note:, context:)
 
-          expect(result.success).to be_falsey
+          expect(result).not_to be_success
           expect(result.error).to be_a(BaseService::MethodNotAllowedFailure)
           expect(result.error.code).to eq("is_draft")
         end
@@ -117,6 +115,7 @@ RSpec.describe CreditNotes::GenerateXmlService, type: :service do
       end
 
       context "when einvoicing is disabled" do
+        let(:billing_entity) { create(:billing_entity, organization:, country: "FR", einvoicing:) }
         let(:einvoicing) { false }
 
         it_behaves_like "dont generate"
