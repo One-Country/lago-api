@@ -1,0 +1,7 @@
+{
+  "customerProfileId": "519123456",
+  "customerPaymentProfileIdList": [],
+  "customerShippingAddressIdList": [],
+  "validationDirectResponseList": [],
+  "messages": {"resultCode": "Ok", "message": [{"code": "I00001", "text": "Successful."}]}
+}

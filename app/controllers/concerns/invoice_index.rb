@@ -78,6 +78,7 @@ module InvoiceIndex
               :cashfree_customer,
               :adyen_customer,
               :moneyhash_customer,
+              :authorize_net_customer,
               {integration_customers: :integration}
             ]
           )

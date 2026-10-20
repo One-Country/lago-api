@@ -1,0 +1,22 @@
+{
+  "profile": {
+    "paymentProfiles": [
+      {
+        "customerPaymentProfileId": "527000001",
+        "payment": {"creditCard": {"cardNumber": "XXXX1111", "expirationDate": "2035-12", "cardType": "Visa"}},
+        "customerType": "individual"
+      },
+      {
+        "defaultPaymentProfile": true,
+        "customerPaymentProfileId": "527000002",
+        "payment": {"creditCard": {"cardNumber": "XXXX0002", "expirationDate": "2031-04", "cardType": "MasterCard"}},
+        "customerType": "individual"
+      }
+    ],
+    "profileType": "regular",
+    "customerProfileId": "519123456",
+    "merchantCustomerId": "cus_123",
+    "email": "member@example.com"
+  },
+  "messages": {"resultCode": "Ok", "message": [{"code": "I00001", "text": "Successful."}]}
+}

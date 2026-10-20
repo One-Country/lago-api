@@ -1,0 +1,20 @@
+{
+  "transactionResponse": {
+    "responseCode": "3",
+    "authCode": "",
+    "avsResultCode": "P",
+    "cvvResultCode": "",
+    "cavvResultCode": "",
+    "transId": "0",
+    "refTransID": "",
+    "transHash": "",
+    "testRequest": "0",
+    "accountNumber": "XXXX1111",
+    "accountType": "Visa",
+    "errors": [{"errorCode": "11", "errorText": "A duplicate transaction has been submitted."}],
+    "transHashSha2": "",
+    "SupplementalDataQualificationIndicator": 0
+  },
+  "refId": "ref",
+  "messages": {"resultCode": "Error", "message": [{"code": "E00027", "text": "The transaction was unsuccessful."}]}
+}

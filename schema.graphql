@@ -552,6 +552,24 @@ input AddAdyenPaymentProviderInput {
 }
 
 """
+Authorize.net input arguments
+"""
+input AddAuthorizeNetPaymentProviderInput {
+  apiLoginId: String!
+
+  """
+  A unique identifier for the client performing the mutation.
+  """
+  clientMutationId: String
+  code: String!
+  environment: AuthorizeNetEnvironmentEnum!
+  name: String!
+  signatureKey: String
+  successRedirectUrl: String
+  transactionKey: String!
+}
+
+"""
 Cashfree input arguments
 """
 input AddCashfreePaymentProviderInput {
@@ -1264,6 +1282,22 @@ enum AuthenticationMethodsEnum {
 
 type Authorize {
   url: String!
+}
+
+enum AuthorizeNetEnvironmentEnum {
+  production
+  sandbox
+}
+
+type AuthorizeNetProvider {
+  apiLoginId: ObfuscatedString
+  code: String!
+  environment: AuthorizeNetEnvironmentEnum!
+  id: ID!
+  name: String!
+  signatureKey: ObfuscatedString
+  successRedirectUrl: String
+  transactionKey: ObfuscatedString
 }
 
 type AvalaraCustomer {
@@ -8647,6 +8681,16 @@ type Mutation {
   ): AdyenProvider
 
   """
+  Add Authorize.net payment provider
+  """
+  addAuthorizeNetPaymentProvider(
+    """
+    Parameters for AddAuthorizeNetPaymentProvider
+    """
+    input: AddAuthorizeNetPaymentProviderInput!
+  ): AuthorizeNetProvider
+
+  """
   Add or update Cashfree payment provider
   """
   addCashfreePaymentProvider(
@@ -10429,6 +10473,16 @@ type Mutation {
   ): ApiKey
 
   """
+  Update Authorize.net payment provider
+  """
+  updateAuthorizeNetPaymentProvider(
+    """
+    Parameters for UpdateAuthorizeNetPaymentProvider
+    """
+    input: UpdateAuthorizeNetPaymentProviderInput!
+  ): AuthorizeNetProvider
+
+  """
   Update Avalara integration
   """
   updateAvalaraIntegration(
@@ -11422,7 +11476,7 @@ enum PaymentMethodTypeEnum {
   provider
 }
 
-union PaymentProvider = AdyenProvider | CashfreeProvider | FlutterwaveProvider | GocardlessProvider | MoneyhashProvider | StripeProvider
+union PaymentProvider = AdyenProvider | AuthorizeNetProvider | CashfreeProvider | FlutterwaveProvider | GocardlessProvider | MoneyhashProvider | StripeProvider
 
 """
 PaymentProviderCollection type
@@ -12342,6 +12396,7 @@ enum ProviderPaymentMethodsEnum {
 
 enum ProviderTypeEnum {
   adyen
+  authorize_net
   cashfree
   flutterwave
   gocardless
@@ -15718,6 +15773,23 @@ input UpdateApiKeyInput {
   id: ID!
   name: String
   permissions: JSON
+}
+
+"""
+Update input arguments
+"""
+input UpdateAuthorizeNetPaymentProviderInput {
+  """
+  A unique identifier for the client performing the mutation.
+  """
+  clientMutationId: String
+  code: String
+  flowId: String
+  id: ID!
+  name: String
+  requireTermsOfServiceConsent: Boolean
+  successRedirectUrl: String
+  supports3ds: Boolean
 }
 
 """

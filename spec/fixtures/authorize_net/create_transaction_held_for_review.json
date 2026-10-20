@@ -1,0 +1,20 @@
+{
+  "transactionResponse": {
+    "responseCode": "4",
+    "authCode": "",
+    "avsResultCode": "Y",
+    "cvvResultCode": "",
+    "cavvResultCode": "",
+    "transId": "80042512347",
+    "refTransID": "",
+    "transHash": "",
+    "testRequest": "0",
+    "accountNumber": "XXXX1111",
+    "accountType": "Visa",
+    "messages": [{"code": "252", "description": "Your order has been received. Thank you for your business!"}],
+    "transHashSha2": "",
+    "SupplementalDataQualificationIndicator": 0
+  },
+  "refId": "ref",
+  "messages": {"resultCode": "Ok", "message": [{"code": "I00001", "text": "Successful."}]}
+}

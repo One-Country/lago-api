@@ -6,6 +6,7 @@ module Types
       graphql_name "PaymentProvider"
 
       possible_types Types::PaymentProviders::Adyen,
+        Types::PaymentProviders::AuthorizeNet,
         Types::PaymentProviders::Gocardless,
         Types::PaymentProviders::Stripe,
         Types::PaymentProviders::Cashfree,
@@ -16,6 +17,8 @@ module Types
         case object.class.to_s
         when "PaymentProviders::AdyenProvider"
           Types::PaymentProviders::Adyen
+        when "PaymentProviders::AuthorizeNetProvider"
+          Types::PaymentProviders::AuthorizeNet
         when "PaymentProviders::StripeProvider"
           Types::PaymentProviders::Stripe
         when "PaymentProviders::GocardlessProvider"

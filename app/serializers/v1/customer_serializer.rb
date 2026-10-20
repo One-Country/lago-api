@@ -88,6 +88,9 @@ module V1
       when :moneyhash
         configuration[:provider_customer_id] = model.moneyhash_customer&.provider_customer_id
         configuration.merge!(model.moneyhash_customer&.settings&.symbolize_keys || {})
+      when :authorize_net
+        configuration[:provider_customer_id] = model.authorize_net_customer&.provider_customer_id
+        configuration.merge!(model.authorize_net_customer&.settings&.symbolize_keys || {})
       end
 
       configuration

@@ -27,6 +27,8 @@ module Resolvers
       case type
       when "adyen"
         PaymentProviders::AdyenProvider.to_s
+      when "authorize_net"
+        PaymentProviders::AuthorizeNetProvider.to_s
       when "stripe"
         PaymentProviders::StripeProvider.to_s
       when "gocardless"
