@@ -5,7 +5,7 @@ require "rails_helper"
 RSpec.describe PaymentProviders::AuthorizeNet::Customers::CreateService do
   subject(:result) { described_class.call(customer:, payment_provider_id: authorize_net_provider.id, params:, async: true) }
 
-  let_it_be(:organization) { create(:organization) }
+  let(:organization) { create(:organization) }
 
   let(:customer) { create(:customer, organization:) }
   let(:authorize_net_provider) { create(:authorize_net_provider, organization:) }

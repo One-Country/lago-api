@@ -3,7 +3,7 @@
 require "rails_helper"
 
 RSpec.describe PaymentProviderCustomers::AuthorizeNetService do
-  let_it_be(:organization) { create(:organization) }
+  let(:organization) { create(:organization) }
 
   let(:customer) { create(:customer, organization:, external_id: "cus_1234567890_abcdefghij", email: "member@example.com", name: "Pat Member") }
   let(:authorize_net_provider) { create(:authorize_net_provider, organization:) }

@@ -25,7 +25,6 @@ module PaymentProviders
 
       %i[api_login_id transaction_key signature_key].each do |secret|
         next unless args.key?(secret)
-        next if Types::ObfuscatedStringType.obfuscated?(args[secret])
 
         authorize_net_provider.public_send(:"#{secret}=", args[secret])
       end

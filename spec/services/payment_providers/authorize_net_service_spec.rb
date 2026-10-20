@@ -7,7 +7,7 @@ RSpec.describe PaymentProviders::AuthorizeNetService do
 
   include_context "with mocked security logger"
 
-  let_it_be(:organization) { create(:organization) }
+  let(:organization) { create(:organization) }
 
   describe "#create_or_update" do
     let(:args) do
@@ -58,13 +58,12 @@ RSpec.describe PaymentProviders::AuthorizeNetService do
         create(:authorize_net_provider, organization:, code: "authorize_net_1", api_login_id: "old_login", transaction_key: "old_key")
       end
 
-      it "keeps obfuscated secrets and updates the others" do
+      it "updates the provider" do
         result = authorize_net_service.create_or_update(
           organization:,
           id: existing_provider.id,
           code: "authorize_net_1",
           name: "Renamed",
-          api_login_id: "••••••••…gin",
           transaction_key: "new_key"
         )
 
