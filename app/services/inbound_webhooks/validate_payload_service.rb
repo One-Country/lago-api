@@ -4,6 +4,7 @@ module InboundWebhooks
   class ValidatePayloadService < BaseService
     WEBHOOK_SOURCES = {
       stripe: PaymentProviders::Stripe::ValidateIncomingWebhookService,
+      authorize_net: PaymentProviders::AuthorizeNet::ValidateIncomingWebhookService,
       moneyhash: PaymentProviders::Moneyhash::ValidateIncomingWebhookService
     }
 

@@ -183,6 +183,7 @@ RSpec.describe PaymentProviders::AuthorizeNet::Payments::CreateService do
       it "keeps the payment processing so nothing charges again" do
         expect(result).to be_success
         expect(WebMock).to have_requested(:post, api_url).with(body: hash_including("getUnsettledTransactionListRequest")).times(4)
+        expect(PaymentProviders::AuthorizeNet::Payments::ReconcileJob).to have_been_enqueued.with(payment)
         expect(result.payment).to have_attributes(
           provider_payment_id: nil,
           status: "held_for_review",

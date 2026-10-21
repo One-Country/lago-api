@@ -1,0 +1,15 @@
+{
+  "notificationId": "d0e8e7fe-c3e7-4add-a480-27bc5ce28a20",
+  "eventType": "net.authorize.payment.fraud.approved",
+  "eventDate": "2026-10-21T13:20:00.0000000Z",
+  "webhookId": "4f2c2e1d-6c5e-4b0c-9a1e-6f3f8a2b1c77",
+  "payload": {
+    "responseCode": 1,
+    "authCode": "LZ4V3S",
+    "avsResponse": "Y",
+    "authAmount": 25.0,
+    "fraudList": [{"fraudFilter": "Hourly Velocity Filter", "fraudAction": "authAndHold"}],
+    "entityName": "transaction",
+    "id": "80042512347"
+  }
+}

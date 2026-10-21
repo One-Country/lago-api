@@ -439,4 +439,46 @@ RSpec.describe WebhooksController do
       end
     end
   end
+
+  describe "POST /authorize_net" do
+    let(:organization) { create(:organization) }
+    let(:payment_provider) { create(:authorize_net_provider, organization:, code: "authorize_net_1", signature_key: "56E529FB8ABC") }
+    let(:body) { File.read(Rails.root.join("spec/fixtures/authorize_net/webhook_fraud_approved.json")) }
+    let(:signature) { "sha512=#{OpenSSL::HMAC.hexdigest("SHA512", "56E529FB8ABC", body).upcase}" }
+
+    before { payment_provider }
+
+    def post_webhook
+      post(
+        "/webhooks/authorize_net/#{organization.id}?code=#{payment_provider.code}",
+        params: body,
+        headers: {"Content-Type" => "application/json", "X-ANET-Signature" => signature}
+      )
+    end
+
+    it "stores the webhook and processes it in the background" do
+      post_webhook
+
+      expect(response).to have_http_status(:success)
+      expect(InboundWebhook.sole).to have_attributes(
+        source: "authorize_net",
+        code: "authorize_net_1",
+        event_type: "net.authorize.payment.fraud.approved",
+        payload: body,
+        signature:
+      )
+      expect(InboundWebhooks::ProcessJob).to have_been_enqueued
+    end
+
+    context "when the signature does not match" do
+      let(:signature) { "sha512=#{"0" * 128}" }
+
+      it "returns a bad request" do
+        post_webhook
+
+        expect(response).to have_http_status(:bad_request)
+        expect(InboundWebhook.count).to eq(0)
+      end
+    end
+  end
 end

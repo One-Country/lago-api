@@ -38,6 +38,13 @@ module PaymentProviders
         }.freeze
 
         TRANSIENT_ERRORS = LagoHttpClient::Client::TRANSIENT_ERROR_CLASSES
+        RECONCILE_DELAY = 10.minutes
+
+        # Every attempt of a payment carries the same invoice number, so
+        # Authorize.net can tell a retry from a new charge.
+        def self.invoice_number(payment)
+          Digest::SHA256.hexdigest("lago-payment-#{payment.id}").first(INVOICE_NUMBER_LENGTH)
+        end
 
         def initialize(payment:, reference:, metadata:)
           @payment = payment
@@ -90,7 +97,7 @@ module PaymentProviders
         end
 
         def invoice_number
-          @invoice_number ||= Digest::SHA256.hexdigest("lago-payment-#{payment.id}").first(INVOICE_NUMBER_LENGTH)
+          @invoice_number ||= self.class.invoice_number(payment)
         end
 
         # Keys follow the order of Authorize.net's XML schema.
@@ -124,8 +131,9 @@ module PaymentProviders
           earlier = find_earlier_transaction
 
           if earlier.nil?
-            # NOTE: An earlier attempt was sent but can't be found. Keep the payment
-            #       processing so nothing charges again until it is reconciled.
+            # NOTE: An earlier attempt was sent but can't be found yet. Keep the
+            #       payment processing so nothing charges again, and look again later.
+            AfterCommitEverywhere.after_commit { ReconcileJob.set(wait: RECONCILE_DELAY).perform_later(payment) }
             return apply_transaction(transaction_id: nil, status: "held_for_review", error_code: DUPLICATE_REASON_CODE)
           end
 
