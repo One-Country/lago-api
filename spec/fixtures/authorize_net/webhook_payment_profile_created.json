@@ -1,0 +1,12 @@
+{
+  "notificationId": "5c3f4d8e-2b1a-4f6c-8d9e-1a2b3c4d5e6f",
+  "eventType": "net.authorize.customer.paymentProfile.created",
+  "eventDate": "2026-10-21T13:20:00.0000000Z",
+  "webhookId": "4f2c2e1d-6c5e-4b0c-9a1e-6f3f8a2b1c77",
+  "payload": {
+    "customerProfileId": 519123456,
+    "entityName": "customerPaymentProfile",
+    "id": "527000003",
+    "customerType": "individual"
+  }
+}

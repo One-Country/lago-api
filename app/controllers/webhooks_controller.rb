@@ -94,6 +94,21 @@ class WebhooksController < ApplicationController
     params["notificationItems"]&.first&.dig("NotificationRequestItem")&.permit!
   end
 
+  def authorize_net
+    result = InboundWebhooks::CreateService.call(
+      organization_id: params[:organization_id],
+      webhook_source: :authorize_net,
+      code: params[:code].presence,
+      payload: request.body.read,
+      signature: request.headers["X-ANET-Signature"],
+      event_type: params[:eventType]
+    )
+
+    return head(:bad_request) unless result.success?
+
+    head(:ok)
+  end
+
   def moneyhash
     result = InboundWebhooks::CreateService.call(
       organization_id: params[:organization_id],

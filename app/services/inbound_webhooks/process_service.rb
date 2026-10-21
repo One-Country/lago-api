@@ -4,6 +4,7 @@ module InboundWebhooks
   class ProcessService < BaseService
     WEBHOOK_HANDLER_SERVICES = {
       stripe: PaymentProviders::Stripe::HandleIncomingWebhookService,
+      authorize_net: PaymentProviders::AuthorizeNet::HandleIncomingWebhookService,
       moneyhash: PaymentProviders::Moneyhash::HandleIncomingWebhookService
     }
 
